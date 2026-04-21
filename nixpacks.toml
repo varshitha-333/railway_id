@@ -1,8 +1,8 @@
 [phases.setup]
-nixPkgs = ["python311", "gcc", "libffi", "freetype", "libjpeg", "zlib"]
+nixPkgs = ["python311", "python311Packages.pip", "gcc", "libffi", "freetype", "libjpeg", "zlib"]
 
 [phases.install]
-cmds = ["pip install -r requirements.txt"]
+cmds = ["pip3 install -r requirements.txt"]
 
 [start]
 cmd = "gunicorn app:app --workers 2 --threads 4 --timeout 180 --bind 0.0.0.0:$PORT --worker-class gthread --max-requests 100 --max-requests-jitter 10"
