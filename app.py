@@ -1016,82 +1016,72 @@ def build_pdf_file_vector(students: list):
         print("DEBUG: Template PDF not found — using raster fallback")
         return None
 
-    n_pages     = (len(students) + CARDS_PER_PAGE - 1) // CARDS_PER_PAGE
-    tmp         = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf", dir=PDF_TEMP_DIR)
+    n_pages  = (len(students) + CARDS_PER_PAGE - 1) // CARDS_PER_PAGE
+    tmp      = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf", dir=PDF_TEMP_DIR)
     tmp.close()
-    out_path    = tmp.name
-    first_write = True
+    out_path = tmp.name
+
+    # Single output doc — all pages added here, saved once at the end
+    out_doc = fitz.open()
 
     try:
-        for batch_start_page in range(0, n_pages, SAVE_BATCH_PAGES):
-            batch_end_page = min(batch_start_page + SAVE_BATCH_PAGES, n_pages)
-            batch_doc      = fitz.open()
+        for page_idx in range(n_pages):
+            student_start = page_idx * CARDS_PER_PAGE
+            student_batch = students[student_start : student_start + CARDS_PER_PAGE]
 
-            for page_idx in range(batch_start_page, batch_end_page):
-                student_start = page_idx * CARDS_PER_PAGE
-                student_batch = students[student_start : student_start + CARDS_PER_PAGE]
+            a4_page = out_doc.new_page(width=A4_W_PT, height=A4_H_PT)
 
-                a4_page = batch_doc.new_page(width=A4_W_PT, height=A4_H_PT)
+            for idx, student in enumerate(student_batch):
+                col = idx % COLS
+                row = idx // COLS
 
-                for idx, student in enumerate(student_batch):
-                    col = idx % COLS
-                    row = idx // COLS
+                card_x      = OX_PT + col * COL_STEP
+                card_y      = OY_PT + row * ROW_STEP
+                target_rect = fitz.Rect(card_x, card_y, card_x + CARD_W_PT, card_y + CARD_H_PT)
 
-                    card_x      = OX_PT + col * COL_STEP
-                    card_y      = OY_PT + row * ROW_STEP
-                    target_rect = fitz.Rect(card_x, card_y, card_x + CARD_W_PT, card_y + CARD_H_PT)
+                card_doc = render_card_pdf(student)
+                if card_doc is None:
+                    continue
 
-                    card_doc = render_card_pdf(student)
-                    if card_doc is None:
-                        continue
+                a4_page.show_pdf_page(target_rect, card_doc, 0, keep_proportion=False)
+                card_doc.close()
 
-                    a4_page.show_pdf_page(target_rect, card_doc, 0, keep_proportion=False)
-                    card_doc.close()
-
-                    if row < ROWS - 1:
-                        gap_top  = card_y + CARD_H_PT
-                        badge_cx = card_x + CARD_W_PT / 2.0
-                        badge_cy = gap_top + ROW_GAP_PT / 2.0
-                        draw_serial_badge_vector(
-                            a4_page,
-                            student_start + idx + 1,
-                            badge_cx, badge_cy,
-                            ROW_GAP_PT,
-                        )
-
-            try:
-                if first_write:
-                    batch_doc.save(
-                        out_path,
-                        deflate=True, deflate_images=True, deflate_fonts=True,
-                        garbage=4, clean=True, linear=False,
+                if row < ROWS - 1:
+                    gap_top  = card_y + CARD_H_PT
+                    badge_cx = card_x + CARD_W_PT / 2.0
+                    badge_cy = gap_top + ROW_GAP_PT / 2.0
+                    draw_serial_badge_vector(
+                        a4_page,
+                        student_start + idx + 1,
+                        badge_cx, badge_cy,
+                        ROW_GAP_PT,
                     )
-                    first_write = False
-                else:
-                    tmp2 = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf", dir=PDF_TEMP_DIR)
-                    tmp2.close()
-                    existing = fitz.open(out_path)
-                    existing.insert_pdf(batch_doc)
-                    existing.save(
-                        tmp2.name,
-                        deflate=True, deflate_images=True, deflate_fonts=True,
-                        garbage=4, clean=True,
-                    )
-                    existing.close()
-                    os.replace(tmp2.name, out_path)
-            finally:
-                batch_doc.close()
+
+            # Free memory every 10 pages
+            if (page_idx + 1) % SAVE_BATCH_PAGES == 0:
                 gc.collect()
 
+        # Single save — no merge loop, no reopen
+        out_doc.save(
+            out_path,
+            deflate=True, deflate_images=True, deflate_fonts=True,
+            garbage=4, clean=True, linear=False,
+        )
+        print(f"DEBUG: PDF saved — {n_pages} pages, {len(students)} students")
         return out_path
 
-    except Exception:
+    except Exception as e:
+        print(f"DEBUG: build_pdf_file_vector failed: {e}")
         try:
             if os.path.exists(out_path):
                 os.unlink(out_path)
         except Exception:
             pass
         raise
+    finally:
+        out_doc.close()
+        gc.collect()
+
 
 # ── Raster fallback ───────────────────────────────────────────────
 
