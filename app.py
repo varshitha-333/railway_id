@@ -1068,14 +1068,17 @@ def build_pdf_file_vector(students: list):
                     )
                     first_write = False
                 else:
+                    tmp2 = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf", dir=PDF_TEMP_DIR)
+                    tmp2.close()
                     existing = fitz.open(out_path)
                     existing.insert_pdf(batch_doc)
                     existing.save(
-                        out_path,
+                        tmp2.name,
                         deflate=True, deflate_images=True, deflate_fonts=True,
-                        garbage=4, clean=True, incremental=False,
+                        garbage=4, clean=True,
                     )
                     existing.close()
+                    os.replace(tmp2.name, out_path)
             finally:
                 batch_doc.close()
                 gc.collect()
