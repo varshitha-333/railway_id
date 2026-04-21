@@ -1316,21 +1316,18 @@ def send_generated_pdf(students, dpi, download_name, as_attachment, allow_extern
     if not pdf_path:
         return jsonify({"error": "PDF generation failed — check server libs"}), 500
 
-    @after_this_request
-    def cleanup(response):
-        _unregister_tmp(pdf_path)
-        try:
-            if os.path.exists(pdf_path):
-                os.unlink(pdf_path)
-        except Exception:
-            pass
-        gc.collect()
-        return response
-
+    # ── External storage path ─────────────────────────────────────
     if allow_external and _external_storage_enabled():
         try:
             remote_url = upload_pdf_to_external_storage(pdf_path, download_name)
             if remote_url:
+                # safe to delete now — already uploaded
+                _unregister_tmp(pdf_path)
+                try:
+                    os.unlink(pdf_path)
+                except Exception:
+                    pass
+                gc.collect()
                 return jsonify({
                     "success": True,
                     "storage": STORAGE_BACKEND,
@@ -1340,12 +1337,33 @@ def send_generated_pdf(students, dpi, download_name, as_attachment, allow_extern
         except Exception as e:
             print(f"DEBUG: External storage upload failed: {e}")
 
+    # ── Local streaming path ──────────────────────────────────────
+    # FIX: Read the entire PDF into a BytesIO buffer FIRST, then
+    # delete the temp file. This eliminates the race condition where
+    # after_this_request deleted the file before send_file finished
+    # streaming it → causing "200 0 bytes" responses.
+    try:
+        with open(pdf_path, "rb") as fh:
+            pdf_bytes = fh.read()
+    finally:
+        # Delete immediately after reading — safe because we now
+        # serve from the in-memory buffer, not the file on disk.
+        _unregister_tmp(pdf_path)
+        try:
+            os.unlink(pdf_path)
+        except Exception:
+            pass
+        gc.collect()
+
+    buf = io.BytesIO(pdf_bytes)
+    buf.seek(0)
+    del pdf_bytes   # free the raw bytes; BytesIO holds its own copy
+
     return send_file(
-        pdf_path,
+        buf,
         mimetype="application/pdf",
         as_attachment=as_attachment,
         download_name=download_name,
-        conditional=True,
         max_age=0,
     )
 
