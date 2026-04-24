@@ -1,6 +1,6 @@
 # gunicorn.conf.py  — place this next to app.py and run:
 #   gunicorn -c gunicorn.conf.py app:app
-#
+##
 # FIX v2.2: The root cause of "server error" for 70+ students is that
 # Gunicorn's default 30-second worker timeout kills the PDF generation
 # worker mid-flight.  600 students at 0.5 CPU takes ~60-120 seconds.
