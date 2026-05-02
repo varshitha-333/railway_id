@@ -75,6 +75,11 @@ def _options_handler(subpath=""):
 BASE_DIR               = Path(__file__).parent
 TEMPLATE_PDF_HEBRON    = BASE_DIR / "template_id_card.pdf"
 TEMPLATE_PDF_REDEEMER  = BASE_DIR / "template_redeemer.pdf"
+<<<<<<< HEAD
+TEMPLATE_PDF_PRIYANKA  = BASE_DIR / "template_priyanka.pdf"
+TEMPLATE_PDF_AB_ASCENT = BASE_DIR / "template_ab_ascent.pdf"
+=======
+>>>>>>> 5e42312dcd1687d7a9c19228843c00fd9ba8b09e
 ANTON_FONT             = BASE_DIR / "Anton-Regular.ttf"
 ARIAL_BOLD             = BASE_DIR / "arialbd.ttf"
 FALLBACK_PHOTO         = BASE_DIR / "student_photo.jpg"
@@ -114,6 +119,33 @@ TEMPLATE_CONFIGS = {
             "mobile", "session", "photo_url", "adm_no",
         ],
     },
+<<<<<<< HEAD
+    "priyanka": {
+        "key": "priyanka",
+        "label": "Priyanka",
+        "display_name": "Priyanka Dreamnest School",
+        # Replace TEMPLATE_PDF_REDEEMER below with TEMPLATE_PDF_PRIYANKA once you have the actual PDF file.
+        "pdf": TEMPLATE_PDF_PRIYANKA if TEMPLATE_PDF_PRIYANKA.exists() else TEMPLATE_PDF_REDEEMER,
+        "description": "Priyanka Dreamnest School ID layout.",
+        "fields": [
+            "student_name", "class", "father_name", "dob", "address",
+            "mobile", "session", "photo_url", "adm_no",
+        ],
+    },
+    "ab_ascent": {
+        "key": "ab_ascent",
+        "label": "Ab Ascent",
+        "display_name": "Ab Ascent School",
+        # Replace TEMPLATE_PDF_REDEEMER below with TEMPLATE_PDF_AB_ASCENT once you have the actual PDF file.
+        "pdf": TEMPLATE_PDF_AB_ASCENT if TEMPLATE_PDF_AB_ASCENT.exists() else TEMPLATE_PDF_REDEEMER,
+        "description": "Ab Ascent School ID layout.",
+        "fields": [
+            "student_name", "class", "father_name", "dob", "address",
+            "mobile", "session", "photo_url", "adm_no",
+        ],
+    },
+=======
+>>>>>>> 5e42312dcd1687d7a9c19228843c00fd9ba8b09e
 }
 
 API_BASE_URL = "https://titusattendence.com/apikey/apistudents?school_id={school_id}"
@@ -1706,12 +1738,351 @@ def draw_card_overlay_redeemer(page, student: dict, tr):
     )
 
 
+<<<<<<< HEAD
+# ─────────────────────────────────────────────────────────────────
+# PRIYANKA DREAMNEST overlay
+# Coordinates from PRIYANKA_DREAMNEST.txt
+# Template page size: 141.75 x 240.75 pt
+# ─────────────────────────────────────────────────────────────────
+
+# Color constants for Priyanka
+PRIY_DARK_BLUE  = (15/255,   0/255, 106/255)   # #0F006A
+
+# Redact rectangles — sample text zones that must be erased before drawing new data
+PRIY_REDACT_RECTS = [
+    ( 8.13, 130.69,  90.08, 140.73),  # name
+    (26.29, 141.29,  52.74, 148.32),  # class
+    (70.81, 141.29,  74.84, 148.32),  # section
+    (96.53, 141.29, 103.41, 148.32),  # roll
+    (109.16, 110.50, 128.80, 117.11), # session
+    (56.76, 155.18, 109.17, 161.88),  # father
+    (56.76, 162.73, 105.50, 169.42),  # mother
+    (56.76, 170.27,  87.42, 176.97),  # dob
+    (56.76, 178.56,  84.73, 185.26),  # address line 1
+    (56.76, 186.56, 112.37, 193.25),  # address line 2
+    (56.76, 194.35,  90.09, 201.05),  # contact
+]
+
+# Field definitions: (field_key, x, baseline_y, max_width, font_size)
+PRIY_FIELDS = [
+    # name — large, left-aligned on the pink ribbon
+    ("student_name",  8.13, 138.6,  100.0, 8.99),
+    # class / section / roll drawn separately below
+    # session
+    ("session",     109.16, 115.5,   28.0, 6.0),
+    # father
+    ("father_name",  56.76, 160.4,   80.0, 6.0),
+    # mother
+    ("mother_name",  56.76, 168.4,   80.0, 6.0),
+    # dob
+    ("dob",          56.76, 176.4,   80.0, 6.0),
+    # contact
+    ("mobile",       56.76, 200.0,   80.0, 6.0),
+]
+
+# Photo box (with 2.2 pt inner padding)
+PRIY_PHOTO_PAD = 2.2
+PRIY_PHOTO_BOX_RAW = (46.34, 57.75, 46.34+49.92, 57.75+63.95)  # x0,y0,x1,y1
+
+def draw_card_overlay_priyanka(page, student: dict, tr):
+    print(f"DEBUG PRIYANKA OVERLAY START: student={student.get('student_name','?')!r} tr_src={tr['src']} tr_dst={tr['dst']}")
+    """
+    Overlay student data on the Priyanka Dreamnest card template.
+
+    CRITICAL: show_pdf_page() embeds the template as a PDF XObject — its text
+    is NOT editable and apply_redactions() has no effect on it.
+    We must paint opaque rectangles (matching the background color) over sample
+    text zones BEFORE drawing new values, so old sample text is hidden.
+
+    Background zones in Priyanka template:
+      - Name ribbon (y≈130-150):  yellow  #FFDE59  →  (1.0, 0.867, 0.349)
+      - Class/Sec/Roll row:        yellow  (same ribbon)
+      - White data rows below:     white   (1,1,1)
+      - Session box top-right:     white   (1,1,1)
+    """
+    _, bold_obj, _, bold_fn, _, fn_bold = _ensure_fonts()
+    if bold_obj is None:
+        return
+
+    PRIY_YELLOW = (1.0, 222/255, 89/255)   # #FFDE59 — ribbon background
+    PRIY_WHITE  = (1.0, 1.0, 1.0)
+
+    # ── 1. Paint over sample text with matching background color ─────
+    # (x0, y0, x1, y1, bg_color) — covers the sample value exactly
+    PRIY_WHITEOUT = [
+        # name on yellow ribbon
+        ( 8.13, 129.5,  112.0, 141.5,  PRIY_YELLOW),
+        # class / section / roll on yellow ribbon
+        (26.29, 140.0,  115.0, 149.5,  PRIY_YELLOW),
+        # session (white area top-right)
+        (109.16, 109.5, 141.0, 118.5,  PRIY_WHITE),
+        # father (white)
+        (56.76, 154.0,  130.0, 163.0,  PRIY_WHITE),
+        # mother (white)
+        (56.76, 161.5,  130.0, 170.5,  PRIY_WHITE),
+        # dob (white)
+        (56.76, 169.5,  130.0, 178.5,  PRIY_WHITE),
+        # address line 1 (white)
+        (56.76, 177.5,  130.0, 186.5,  PRIY_WHITE),
+        # address line 2 (white)
+        (56.76, 185.5,  130.0, 194.5,  PRIY_WHITE),
+        # contact (white)
+        (56.76, 193.0,  130.0, 202.5,  PRIY_WHITE),
+    ]
+    for x0, y0, x1, y1, bg in PRIY_WHITEOUT:
+        page.draw_rect(
+            _tr_rect(tr, (x0, y0, x1, y1)),
+            color=bg, fill=bg, width=0, overlay=True,
+        )
+
+    # ── 2. Photo ────────────────────────────────────────────────────
+    pad = PRIY_PHOTO_PAD
+    px0, py0, px1, py1 = PRIY_PHOTO_BOX_RAW
+    photo_bytes = fetch_photo_bytes(student.get("photo_url", ""))
+    if photo_bytes:
+        page.insert_image(
+            _tr_rect(tr, (px0+pad, py0+pad, px1-pad, py1-pad)),
+            stream=photo_bytes, overlay=True, keep_proportion=False,
+        )
+
+    # ── 3. Name on yellow ribbon ─────────────────────────────────────
+    name = clean_card_value(student.get("student_name", "")).upper()
+    if name:
+        sz = _fit_size(bold_obj, name, 100.0 * tr["sx"], 8.99 * min(tr["sx"], tr["sy"]), 4.0)
+        pt = _tr_point(tr, 8.13, 138.6)
+        page.insert_text((pt.x, pt.y), name, fontname=fn_bold,
+                         fontfile=bold_fn, fontsize=sz, color=PRIY_DARK_BLUE, overlay=True)
+
+    # ── 4. Class / Section / Roll on ribbon ─────────────────────────
+    cls  = clean_card_value(student.get("class",   "")).upper()
+    sec  = clean_card_value(student.get("section", "")).upper()
+    roll = clean_card_value(student.get("roll",    ""))
+    base_sz = 6.0 * min(tr["sx"], tr["sy"])
+
+    if cls:
+        sz = _fit_size(bold_obj, cls, 30.0 * tr["sx"], base_sz, 3.5)
+        pt = _tr_point(tr, 26.29, 146.8)
+        page.insert_text((pt.x, pt.y), cls, fontname=fn_bold,
+                         fontfile=bold_fn, fontsize=sz, color=PRIY_DARK_BLUE, overlay=True)
+    if sec:
+        sz = _fit_size(bold_obj, sec, 12.0 * tr["sx"], base_sz, 3.5)
+        pt = _tr_point(tr, 70.81, 146.8)
+        page.insert_text((pt.x, pt.y), sec, fontname=fn_bold,
+                         fontfile=bold_fn, fontsize=sz, color=PRIY_DARK_BLUE, overlay=True)
+    if roll:
+        sz = _fit_size(bold_obj, roll, 18.0 * tr["sx"], base_sz, 3.5)
+        pt = _tr_point(tr, 96.53, 146.8)
+        page.insert_text((pt.x, pt.y), roll, fontname=fn_bold,
+                         fontfile=bold_fn, fontsize=sz, color=PRIY_DARK_BLUE, overlay=True)
+
+    # ── 5. Scalar fields: session, father, mother, dob, mobile ──────
+    for fkey, fx, fy, fmaxw, fsize in PRIY_FIELDS:
+        val = clean_card_value(student.get(fkey, ""))
+        if not val:
+            continue
+        sz = _fit_size(bold_obj, val, fmaxw * tr["sx"], fsize * min(tr["sx"], tr["sy"]), 3.5)
+        pt = _tr_point(tr, fx, fy)
+        page.insert_text((pt.x, pt.y), val, fontname=fn_bold,
+                         fontfile=bold_fn, fontsize=sz, color=PRIY_DARK_BLUE, overlay=True)
+
+    # ── 6. Address (up to 2 lines, white area) ──────────────────────
+    addr = clean_card_value(student.get("address", ""))
+    if addr:
+        words = addr.split()
+        max_w  = 80.0 * tr["sx"]
+        addr_sz = base_sz
+        lines  = _addr_wrap_at_size(bold_obj, words, max_w, addr_sz)[:2]
+        line_h_template = 7.5          # pt in template space
+        for i, line in enumerate(lines):
+            pt = _tr_point(tr, 56.76, 184.4 + i * line_h_template)
+            page.insert_text((pt.x, pt.y), line, fontname=fn_bold,
+                             fontfile=bold_fn, fontsize=addr_sz,
+                             color=PRIY_DARK_BLUE, overlay=True)
+
+
+# ─────────────────────────────────────────────────────────────────
+# AB ASCENT overlay
+# Coordinates from AB_ASCENT.txt  (PLACEHOLDERS list)
+# Template page size: 153 x 243 pt
+# ─────────────────────────────────────────────────────────────────
+
+def _hex_to_rgb01(c_int):
+    r = ((c_int >> 16) & 0xFF) / 255.0
+    g = ((c_int >>  8) & 0xFF) / 255.0
+    b = ( c_int        & 0xFF) / 255.0
+    return (r, g, b)
+
+# Extracted directly from AB_ASCENT.txt PLACEHOLDERS list
+# Format: (field_key, bbox=(x0,y0,x1,y1), font_size, color_int, align, max_x)
+ABA_PLACEHOLDERS = [
+    ("session",      (109.15, 106.44, 133.71, 117.44), 7.5, 0x224499, "left",   148.0),
+    ("adm_no",       ( 25.07, 106.44,  38.66, 117.44), 7.5, 0x224499, "left",    50.0),
+    ("student_name", ( 17.73, 127.58,  99.71, 137.63), 9.0, 0xC83030, "left",   140.0),
+    ("class_",       ( 26.46, 138.40,  32.14, 145.43), 6.0, 0x224499, "left",    58.0),
+    ("section",      ( 73.90, 138.40,  77.93, 145.43), 6.0, 0x224499, "left",    84.0),
+    ("roll",         (100.07, 138.40, 106.95, 145.43), 6.0, 0x224499, "left",   115.0),
+    ("father_name",  ( 60.74, 154.44, 113.16, 161.14), 6.0, 0x224499, "left",   150.0),
+    ("mother_name",  ( 60.74, 161.99, 109.49, 168.69), 6.0, 0x224499, "left",   150.0),
+    ("dob",          ( 60.74, 169.25,  91.41, 175.95), 6.0, 0x224499, "left",   150.0),
+    ("mobile",       ( 60.74, 192.06,  94.08, 198.76), 6.0, 0x224499, "left",   150.0),
+    ("blood_group",  (116.03,  85.52, 125.56,  93.34), 7.0, 0xFFFFFF, "center", 125.56),
+    ("bus_route",    ( 29.21, 204.56,  45.40, 210.70), 5.5, 0x000000, "left",    65.0),
+]
+
+# Photo rect from AB_ASCENT.txt
+ABA_PHOTO_RECT = (52.93, 63.01, 100.07, 116.96)
+ABA_PHOTO_BORDER_COLOR = (0.08, 0.31, 0.86)
+ABA_PHOTO_BORDER_WIDTH = 1.5
+
+# Redact rects — bboxes of sample values (inflated slightly)
+ABA_REDACT_RECTS = [bb for (_, bb, *_rest) in ABA_PLACEHOLDERS]
+
+# Address is split across two rows in the template
+ABA_ADDR1_BBOX = ( 60.74, 176.52,  88.72, 183.22)
+ABA_ADDR2_BBOX = ( 60.74, 184.51, 116.37, 191.21)
+
+
+def draw_card_overlay_ab_ascent(page, student: dict, tr):
+    print(f"DEBUG AB_ASCENT OVERLAY START: student={student.get('student_name','?')!r} tr_src={tr['src']} tr_dst={tr['dst']}")
+    """
+    Overlay student data on the AB Ascent card template.
+
+    CRITICAL: Same as Priyanka — apply_redactions() has NO effect on XObject
+    content placed via show_pdf_page(). We paint opaque white rectangles over
+    sample text zones to erase them, then draw the new values on top.
+
+    AB Ascent background:
+      - All data rows (adm_no, session, name, class, fields): WHITE (1,1,1)
+      - Blood group circle: inside a dark blue shape — we skip erasing it and
+        just overdraw (white text is distinct)
+    """
+    _, bold_obj, _, bold_fn, _, fn_bold = _ensure_fonts()
+    if bold_obj is None:
+        return
+
+    ABA_WHITE = (1.0, 1.0, 1.0)
+
+    # ── 1. Paint white over all sample-value zones ──────────────────
+    # Covers the original placeholder text; extends to max_x so long values clear fully
+    ABA_WHITEOUT = [
+        # session (top-right)
+        (109.15, 105.0, 148.0, 118.5),
+        # adm_no (top-left)
+        ( 25.07, 105.0,  52.0, 118.5),
+        # name (large, red — still on white bg)
+        ( 17.73, 126.0, 141.0, 138.5),
+        # class / section / roll row
+        ( 26.46, 137.0, 115.0, 146.5),
+        # father
+        ( 60.74, 153.0, 151.0, 162.5),
+        # mother
+        ( 60.74, 160.5, 151.0, 170.0),
+        # dob
+        ( 60.74, 168.0, 151.0, 177.0),
+        # address line 1
+        ( 60.74, 175.5, 151.0, 184.0),
+        # address line 2
+        ( 60.74, 183.5, 151.0, 192.0),
+        # mobile
+        ( 60.74, 191.0, 151.0, 200.0),
+        # bus_route
+        ( 29.21, 203.5,  65.0, 211.5),
+    ]
+    for x0, y0, x1, y1 in ABA_WHITEOUT:
+        page.draw_rect(
+            _tr_rect(tr, (x0, y0, x1, y1)),
+            color=ABA_WHITE, fill=ABA_WHITE, width=0, overlay=True,
+        )
+
+    # ── 2. Photo ────────────────────────────────────────────────────
+    photo_bytes = fetch_photo_bytes(student.get("photo_url", ""))
+    if photo_bytes:
+        page.insert_image(
+            _tr_rect(tr, ABA_PHOTO_RECT),
+            stream=photo_bytes, overlay=True, keep_proportion=False,
+        )
+    # Photo border on top
+    page.draw_rect(
+        _tr_rect(tr, ABA_PHOTO_RECT),
+        color=ABA_PHOTO_BORDER_COLOR, fill=None,
+        width=max(0.1, ABA_PHOTO_BORDER_WIDTH * ((tr["sx"] + tr["sy"]) / 2.0)),
+        overlay=True,
+    )
+
+    # ── 3. Draw each placeholder field ─────────────────────────────
+    for fkey, (x0, y0, x1, y1), fsize, color_int, align, max_x in ABA_PLACEHOLDERS:
+        student_key = "class" if fkey == "class_" else fkey
+        val = clean_card_value(student.get(student_key, ""))
+        if not val:
+            continue
+
+        rgb = _hex_to_rgb01(color_int)
+        available_w = (max_x - x0) * tr["sx"]
+        sz = _fit_size(bold_obj, val, available_w, fsize * min(tr["sx"], tr["sy"]), 3.0)
+
+        # baseline: y1 - 0.22 * fsize  (matches AB_ASCENT.txt fit_text_to_box formula)
+        baseline_y_tmpl = y1 - 0.22 * fsize
+        pt = _tr_point(tr, x0, baseline_y_tmpl)
+
+        if align == "center":
+            tw = bold_obj.text_length(val, fontsize=sz)
+            avail_abs = (x1 - x0) * tr["sx"]
+            cx = _tr_point(tr, x0, 0).x + (avail_abs - tw) / 2.0
+            page.insert_text((cx, pt.y), val, fontname=fn_bold,
+                             fontfile=bold_fn, fontsize=sz, color=rgb, overlay=True)
+        else:
+            page.insert_text((pt.x, pt.y), val, fontname=fn_bold,
+                             fontfile=bold_fn, fontsize=sz, color=rgb, overlay=True)
+
+    # ── 4. Address split across two lines ───────────────────────────
+    addr = clean_card_value(student.get("address", ""))
+    if addr:
+        addr_rgb = _hex_to_rgb01(0x224499)
+        addr_sz  = 6.0 * min(tr["sx"], tr["sy"])
+        if "," in addr:
+            line1, line2 = addr.split(",", 1)
+            line1 = line1.strip() + ","
+            line2 = line2.strip()
+        else:
+            words = addr.split()
+            mid   = max(1, len(words) // 2)
+            line1 = " ".join(words[:mid])
+            line2 = " ".join(words[mid:])
+
+        for line, (bx0, by0, bx1, by1) in [(line1, ABA_ADDR1_BBOX), (line2, ABA_ADDR2_BBOX)]:
+            if not line:
+                continue
+            avail_w = (150.0 - bx0) * tr["sx"]
+            sz = _fit_size(bold_obj, line, avail_w, addr_sz, 3.0)
+            baseline_y_tmpl = by1 - 0.22 * 6.0
+            pt = _tr_point(tr, bx0, baseline_y_tmpl)
+            page.insert_text((pt.x, pt.y), line, fontname=fn_bold,
+                             fontfile=bold_fn, fontsize=sz, color=addr_rgb, overlay=True)
+
+
+def draw_card_on_page(page, student: dict, target_rect, template_key: str, template_doc, template_source_rect):
+    print(f"DEBUG draw_card_on_page: template_key={template_key!r} student={student.get(chr(115)+chr(116)+chr(117)+chr(100)+chr(101)+chr(110)+chr(116)+chr(95)+chr(110)+chr(97)+chr(109)+chr(101),chr(63))!r}")
+    page.show_pdf_page(target_rect, template_doc, 0, keep_proportion=False, overlay=True)
+    tr = _make_card_transform(template_source_rect, target_rect)
+    print(f"DEBUG draw_card_on_page: sx={tr[chr(115)+chr(120)]:.4f} sy={tr[chr(115)+chr(121)]:.4f}")
+    if template_key == "redeemer":
+        draw_card_overlay_redeemer(page, student, tr)
+    elif template_key == "priyanka":
+        print("DEBUG: calling draw_card_overlay_priyanka")
+        draw_card_overlay_priyanka(page, student, tr)
+    elif template_key == "ab_ascent":
+        print("DEBUG: calling draw_card_overlay_ab_ascent")
+        draw_card_overlay_ab_ascent(page, student, tr)
+    else:
+        print(f"DEBUG: WRONG PATH - falling to hebron for key={template_key!r}")
+=======
 def draw_card_on_page(page, student: dict, target_rect, template_key: str, template_doc, template_source_rect):
     page.show_pdf_page(target_rect, template_doc, 0, keep_proportion=False, overlay=True)
     tr = _make_card_transform(template_source_rect, target_rect)
     if template_key == "redeemer":
         draw_card_overlay_redeemer(page, student, tr)
     else:
+>>>>>>> 5e42312dcd1687d7a9c19228843c00fd9ba8b09e
         draw_card_overlay_hebron(page, student, tr)
 
 # ─────────────────────────────────────────────────────────────────
@@ -1785,6 +2156,232 @@ ROW_STEP   = CARD_H_PT + ROW_GAP_PT   # precomputed once
 #   4. gc.collect() once per batch, not once per page.
 # ─────────────────────────────────────────────────────────────────
 
+<<<<<<< HEAD
+def _render_priyanka_card_bytes(student: dict, tmpl_bytes: bytes) -> bytes | None:
+    """
+    Render one Priyanka student card as PDF bytes.
+    Opens a FRESH COPY of the template, applies redactions on that page
+    (redaction works because the text IS native on this page), inserts
+    student data, and returns the page bytes.
+    """
+    doc = fitz.open("pdf", tmpl_bytes)
+    page = doc[0]
+
+    _, bold_obj, _, bold_fn, _, fn_bold = _ensure_fonts()
+    if bold_obj is None:
+        doc.close()
+        return None
+
+    PRIY_YELLOW = (1.0, 222/255, 89/255)
+    PRIY_WHITE  = (1.0, 1.0, 1.0)
+    PRIY_BLUE   = (15/255, 0/255, 106/255)
+
+    # Redact sample text from template (works on native page text)
+    sample_rects = [
+        ( 8.13, 130.69,  112.0, 141.5),   # name
+        (26.29, 140.0,   115.0, 149.5),   # class/sec/roll row
+        (109.16, 109.5,  141.0, 118.5),   # session
+        (56.76,  154.0,  130.0, 163.0),   # father
+        (56.76,  161.5,  130.0, 170.5),   # mother
+        (56.76,  169.5,  130.0, 178.5),   # dob
+        (56.76,  177.5,  130.0, 186.5),   # address line 1
+        (56.76,  185.5,  130.0, 194.5),   # address line 2
+        (56.76,  193.0,  130.0, 202.5),   # contact
+    ]
+    for x0, y0, x1, y1 in sample_rects:
+        page.add_redact_annot(fitz.Rect(x0, y0, x1, y1), fill=None)
+    page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+
+    # Photo
+    pad = 2.2
+    px0, py0, px1, py1 = 46.34, 57.75, 46.34+49.92, 57.75+63.95
+    photo_bytes = fetch_photo_bytes(student.get("photo_url", ""))
+    if photo_bytes:
+        page.insert_image(
+            fitz.Rect(px0+pad, py0+pad, px1-pad, py1-pad),
+            stream=photo_bytes, overlay=True, keep_proportion=False,
+        )
+
+    # Name
+    name = clean_card_value(student.get("student_name", "")).upper()
+    if name:
+        sz = _fit_size(bold_obj, name, 100.0, 8.99, 4.0)
+        page.insert_text((8.13, 138.6), name, fontname=fn_bold, fontfile=bold_fn,
+                         fontsize=sz, color=PRIY_BLUE, overlay=True)
+
+    # Class / Section / Roll
+    cls  = clean_card_value(student.get("class",   "")).upper()
+    sec  = clean_card_value(student.get("section", "")).upper()
+    roll = clean_card_value(student.get("roll",    ""))
+    if cls:
+        sz = _fit_size(bold_obj, cls, 30.0, 6.0, 3.5)
+        page.insert_text((26.29, 146.8), cls, fontname=fn_bold, fontfile=bold_fn,
+                         fontsize=sz, color=PRIY_BLUE, overlay=True)
+    if sec:
+        sz = _fit_size(bold_obj, sec, 12.0, 6.0, 3.5)
+        page.insert_text((70.81, 146.8), sec, fontname=fn_bold, fontfile=bold_fn,
+                         fontsize=sz, color=PRIY_BLUE, overlay=True)
+    if roll:
+        sz = _fit_size(bold_obj, roll, 18.0, 6.0, 3.5)
+        page.insert_text((96.53, 146.8), roll, fontname=fn_bold, fontfile=bold_fn,
+                         fontsize=sz, color=PRIY_BLUE, overlay=True)
+
+    # Session
+    sess = clean_card_value(student.get("session", "")) or DEFAULT_SESSION
+    sz = _fit_size(bold_obj, sess, 28.0, 6.0, 3.5)
+    page.insert_text((109.16, 115.5), sess, fontname=fn_bold, fontfile=bold_fn,
+                     fontsize=sz, color=PRIY_BLUE, overlay=True)
+
+    # Father
+    val = clean_card_value(student.get("father_name", ""))
+    if val:
+        sz = _fit_size(bold_obj, val, 80.0, 6.0, 3.5)
+        page.insert_text((56.76, 160.4), val, fontname=fn_bold, fontfile=bold_fn,
+                         fontsize=sz, color=PRIY_BLUE, overlay=True)
+
+    # Mother
+    val = clean_card_value(student.get("mother_name", ""))
+    if val:
+        sz = _fit_size(bold_obj, val, 80.0, 6.0, 3.5)
+        page.insert_text((56.76, 168.4), val, fontname=fn_bold, fontfile=bold_fn,
+                         fontsize=sz, color=PRIY_BLUE, overlay=True)
+
+    # DOB
+    val = clean_card_value(student.get("dob", ""))
+    if val:
+        sz = _fit_size(bold_obj, val, 80.0, 6.0, 3.5)
+        page.insert_text((56.76, 176.4), val, fontname=fn_bold, fontfile=bold_fn,
+                         fontsize=sz, color=PRIY_BLUE, overlay=True)
+
+    # Address (2 lines)
+    addr = clean_card_value(student.get("address", ""))
+    if addr:
+        words = addr.split()
+        lines = _addr_wrap_at_size(bold_obj, words, 80.0, 6.0)[:2]
+        for i, line in enumerate(lines):
+            page.insert_text((56.76, 184.4 + i * 7.5), line,
+                             fontname=fn_bold, fontfile=bold_fn,
+                             fontsize=6.0, color=PRIY_BLUE, overlay=True)
+
+    # Mobile
+    val = clean_card_value(student.get("mobile", ""))
+    if val:
+        sz = _fit_size(bold_obj, val, 80.0, 6.0, 3.5)
+        page.insert_text((56.76, 200.0), val, fontname=fn_bold, fontfile=bold_fn,
+                         fontsize=sz, color=PRIY_BLUE, overlay=True)
+
+    buf = io.BytesIO()
+    doc.save(buf, garbage=4, deflate=True)
+    doc.close()
+    return buf.getvalue()
+
+
+def _render_ab_ascent_card_bytes(student: dict, tmpl_bytes: bytes) -> bytes | None:
+    """
+    Render one AB Ascent student card as PDF bytes.
+    Same approach as Priyanka — redaction on a fresh native-text copy works.
+    """
+    doc = fitz.open("pdf", tmpl_bytes)
+    page = doc[0]
+
+    _, bold_obj, _, bold_fn, _, fn_bold = _ensure_fonts()
+    if bold_obj is None:
+        doc.close()
+        return None
+
+    def h(c): return ((c>>16)&0xFF)/255, ((c>>8)&0xFF)/255, (c&0xFF)/255
+    NAVY   = h(0x224499)
+    RED    = h(0xC83030)
+    WHITE  = (1.0, 1.0, 1.0)
+    BLACK  = (0.0, 0.0, 0.0)
+
+    # Redact ALL sample value zones
+    redact_zones = [
+        (109.15, 105.0, 148.0, 118.5),   # session
+        ( 25.07, 105.0,  52.0, 118.5),   # adm_no
+        ( 17.73, 126.0, 141.0, 138.5),   # name
+        ( 26.46, 137.0, 115.0, 146.5),   # class/sec/roll
+        ( 60.74, 153.0, 151.0, 162.5),   # father
+        ( 60.74, 160.5, 151.0, 170.0),   # mother
+        ( 60.74, 168.0, 151.0, 177.0),   # dob
+        ( 60.74, 175.5, 151.0, 184.0),   # addr line 1
+        ( 60.74, 183.5, 151.0, 192.0),   # addr line 2
+        ( 60.74, 191.0, 151.0, 200.0),   # mobile
+        ( 29.21, 203.5,  65.0, 211.5),   # bus_route
+        (110.0,   83.0, 128.0,  95.0),   # blood group
+    ]
+    for x0, y0, x1, y1 in redact_zones:
+        page.add_redact_annot(fitz.Rect(x0, y0, x1, y1), fill=None)
+    page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+
+    # Photo
+    PHOTO = (52.93, 63.01, 100.07, 116.96)
+    photo_bytes = fetch_photo_bytes(student.get("photo_url", ""))
+    if photo_bytes:
+        page.insert_image(fitz.Rect(*PHOTO), stream=photo_bytes,
+                          overlay=True, keep_proportion=False)
+    page.draw_rect(fitz.Rect(*PHOTO), color=(0.08,0.31,0.86), fill=None, width=1.5, overlay=True)
+
+    def put(text, x0, y1, color, maxw, sz=6.0, center_x1=None):
+        val = clean_card_value(text)
+        if not val: return
+        fs = _fit_size(bold_obj, val, maxw, sz * (CARD_W_PT/153.0), 3.0)
+        # baseline = y1 - 0.22*sz
+        by = y1 - 0.22 * sz
+        if center_x1:
+            tw = bold_obj.text_length(val, fontsize=fs)
+            cx = x0 + ((center_x1 - x0) - tw) / 2.0
+            page.insert_text((cx, by), val, fontname=fn_bold, fontfile=bold_fn,
+                             fontsize=fs, color=color, overlay=True)
+        else:
+            page.insert_text((x0, by), val, fontname=fn_bold, fontfile=bold_fn,
+                             fontsize=fs, color=color, overlay=True)
+
+    # All fields with exact coords from AB_ASCENT.txt
+    put(student.get("session","")    or DEFAULT_SESSION, 109.15, 117.44, NAVY,  148.0-109.15, 7.5)
+    put(student.get("adm_no",""),     25.07, 117.44, NAVY,   50.0-25.07, 7.5)
+    put(student.get("student_name","").upper(), 17.73, 137.63, RED, 140.0-17.73, 9.0)
+    put(student.get("class","").upper(),  26.46, 145.43, NAVY,  58.0-26.46, 6.0)
+    put(student.get("section","").upper(), 73.90, 145.43, NAVY, 84.0-73.90, 6.0)
+    put(student.get("roll",""),      100.07, 145.43, NAVY, 115.0-100.07, 6.0)
+    put(student.get("father_name",""), 60.74, 161.14, NAVY, 150.0-60.74, 6.0)
+    put(student.get("mother_name",""), 60.74, 168.69, NAVY, 150.0-60.74, 6.0)
+    put(student.get("dob",""),         60.74, 175.95, NAVY, 150.0-60.74, 6.0)
+    put(student.get("mobile",""),      60.74, 198.76, NAVY, 150.0-60.74, 6.0)
+
+    # Blood group — centered in circle
+    blood = clean_card_value(student.get("blood_group","")).upper()
+    if blood and any(c.isalpha() for c in blood):
+        put(blood, 116.03, 93.34, WHITE, 125.56-116.03, 7.0, center_x1=125.56)
+
+    # Address split 2 lines
+    addr = clean_card_value(student.get("address",""))
+    if addr:
+        if "," in addr:
+            l1, l2 = addr.split(",", 1)
+            l1, l2 = l1.strip()+",", l2.strip()
+        else:
+            w = addr.split(); m = max(1,len(w)//2)
+            l1, l2 = " ".join(w[:m]), " ".join(w[m:])
+        put(l1, 60.74, 183.22, NAVY, 150.0-60.74, 6.0)
+        put(l2, 60.74, 191.21, NAVY, 150.0-60.74, 6.0)
+
+    buf = io.BytesIO()
+    doc.save(buf, garbage=4, deflate=True)
+    doc.close()
+    return buf.getvalue()
+
+
+def build_pdf_file_vector(students: list, template_key: str = DEFAULT_TEMPLATE) -> str | None:
+    """
+    Build the final output PDF.
+
+    For hebron/redeemer: shared XObject approach (show_pdf_page + overlay drawing).
+    For priyanka/ab_ascent: per-card approach — redact + draw on a fresh copy of
+    the template, then place the result via show_pdf_page. This is the ONLY way
+    to reliably erase the sample text baked into those templates, because
+    apply_redactions() only works on native (non-XObject) page text.
+=======
 def build_pdf_file_vector(students: list, template_key: str = DEFAULT_TEMPLATE) -> str | None:
     """
     Build the final output PDF using a shared template XObject plus direct vector
@@ -1794,13 +2391,26 @@ def build_pdf_file_vector(students: list, template_key: str = DEFAULT_TEMPLATE) 
 
     Result: much lower peak RAM, fewer PDF objects, and a substantially smaller
     output file on low-memory Render instances.
+>>>>>>> 5e42312dcd1687d7a9c19228843c00fd9ba8b09e
     """
     if not HAS_FITZ:
         return None
     template_key = normalize_template_key(template_key)
+<<<<<<< HEAD
+    print(f"DEBUG build_pdf_file_vector: template_key={template_key!r}, students={len(students)}")
+    tmpl_bytes = _ensure_template(template_key)
+    if tmpl_bytes is None:
+        print(f"DEBUG: template bytes missing for {template_key}")
+        return None
+
+    template_doc = _get_template_doc(template_key)
+    if template_doc is None:
+        print(f"DEBUG: template doc missing for {template_key}")
+=======
     template_doc = _get_template_doc(template_key)
     if template_doc is None:
         print(f"DEBUG: Template PDF not found for {template_key} — using raster fallback")
+>>>>>>> 5e42312dcd1687d7a9c19228843c00fd9ba8b09e
         return None
 
     source_rect = fitz.Rect(template_doc[0].rect)
@@ -1810,6 +2420,13 @@ def build_pdf_file_vector(students: list, template_key: str = DEFAULT_TEMPLATE) 
     out_path = tmp.name
     GC_EVERY_PAGES = 20
 
+<<<<<<< HEAD
+    # For priyanka/ab_ascent use per-card rendering
+    use_per_card = template_key in ("priyanka", "ab_ascent")
+    print(f"DEBUG: use_per_card={use_per_card}")
+
+=======
+>>>>>>> 5e42312dcd1687d7a9c19228843c00fd9ba8b09e
     out_doc = fitz.open()
     try:
         for page_idx in range(n_pages):
@@ -1821,25 +2438,55 @@ def build_pdf_file_vector(students: list, template_key: str = DEFAULT_TEMPLATE) 
             for idx, student in enumerate(student_batch):
                 col = idx % COLS
                 row = idx // COLS
+<<<<<<< HEAD
+=======
 
+>>>>>>> 5e42312dcd1687d7a9c19228843c00fd9ba8b09e
                 card_x = OX_PT + col * COL_STEP
                 card_y = OY_PT + row * ROW_STEP
                 target_rect = fitz.Rect(card_x, card_y, card_x + CARD_W_PT, card_y + CARD_H_PT)
 
+<<<<<<< HEAD
+                if use_per_card:
+                    # Render card as independent PDF, then place on A4
+                    if template_key == "priyanka":
+                        card_bytes = _render_priyanka_card_bytes(student, tmpl_bytes)
+                    else:
+                        card_bytes = _render_ab_ascent_card_bytes(student, tmpl_bytes)
+
+                    if card_bytes:
+                        card_doc = fitz.open("pdf", card_bytes)
+                        a4_page.show_pdf_page(target_rect, card_doc, 0,
+                                              keep_proportion=False, overlay=True)
+                        card_doc.close()
+                    else:
+                        print(f"DEBUG: card_bytes is None for {student.get('student_name','?')}")
+                else:
+                    draw_card_on_page(
+                        a4_page, student, target_rect, template_key,
+                        template_doc=template_doc, template_source_rect=source_rect,
+                    )
+=======
                 draw_card_on_page(
                     a4_page, student, target_rect, template_key,
                     template_doc=template_doc, template_source_rect=source_rect,
                 )
+>>>>>>> 5e42312dcd1687d7a9c19228843c00fd9ba8b09e
 
                 if row < ROWS - 1:
                     gap_top = card_y + CARD_H_PT
                     badge_cx = card_x + CARD_W_PT / 2.0
                     badge_cy = gap_top + ROW_GAP_PT / 2.0
                     draw_serial_badge_vector(
+<<<<<<< HEAD
+                        a4_page, student_start + idx + 1,
+                        badge_cx, badge_cy, ROW_GAP_PT,
+=======
                         a4_page,
                         student_start + idx + 1,
                         badge_cx, badge_cy,
                         ROW_GAP_PT,
+>>>>>>> 5e42312dcd1687d7a9c19228843c00fd9ba8b09e
                     )
 
             if (page_idx + 1) % GC_EVERY_PAGES == 0:
@@ -1854,7 +2501,13 @@ def build_pdf_file_vector(students: list, template_key: str = DEFAULT_TEMPLATE) 
         print(f"DEBUG: PDF saved ({os.path.getsize(out_path)//1024} KB)")
         return out_path
 
+<<<<<<< HEAD
+    except Exception as e:
+        print(f"DEBUG: build_pdf_file_vector EXCEPTION: {e}")
+        import traceback; traceback.print_exc()
+=======
     except Exception:
+>>>>>>> 5e42312dcd1687d7a9c19228843c00fd9ba8b09e
         try:
             if os.path.exists(out_path):
                 os.unlink(out_path)
@@ -2006,6 +2659,16 @@ def send_generated_pdf(students, dpi, download_name, as_attachment, allow_extern
 # TEMPLATE API
 # ─────────────────────────────────────────────────────────────────
 
+<<<<<<< HEAD
+TEMPLATE_BRAND_COLORS = {
+    "hebron":    "#DC2626",
+    "redeemer":  "#4F46E5",
+    "priyanka":  "#0F006A",
+    "ab_ascent": "#224499",
+}
+
+=======
+>>>>>>> 5e42312dcd1687d7a9c19228843c00fd9ba8b09e
 @app.route("/api/templates", methods=["GET"])
 @app.route("/templates", methods=["GET"])
 def get_templates():
@@ -2017,6 +2680,10 @@ def get_templates():
             "display_name": template["display_name"],
             "description": template["description"],
             "fields": template["fields"],
+<<<<<<< HEAD
+            "color": TEMPLATE_BRAND_COLORS.get(key, "#4F46E5"),
+=======
+>>>>>>> 5e42312dcd1687d7a9c19228843c00fd9ba8b09e
             "preview_url": f"/api/templates/{key}/preview.png",
         })
     return jsonify(payload)
@@ -2128,6 +2795,11 @@ def _startup_log():
     print("  ID Card Generator  v2.1  (vector-native, gunicorn-ready)")
     print(f"  Hebron PDF    : {ck+' found' if TEMPLATE_PDF_HEBRON.exists() else xk+' NOT FOUND — raster fallback'}")
     print(f"  Redeemer PDF  : {ck+' found' if TEMPLATE_PDF_REDEEMER.exists() else xk+' NOT FOUND — raster fallback'}")
+<<<<<<< HEAD
+    print(f"  Priyanka PDF  : {ck+' found' if TEMPLATE_PDF_PRIYANKA.exists() else xk+' NOT FOUND — using Redeemer as fallback'}")
+    print(f"  Ab Ascent PDF : {ck+' found' if TEMPLATE_PDF_AB_ASCENT.exists() else xk+' NOT FOUND — using Redeemer as fallback'}")
+=======
+>>>>>>> 5e42312dcd1687d7a9c19228843c00fd9ba8b09e
     print(f"  Anton font    : {ck+' found' if ANTON_FONT.exists() else xk+' NOT FOUND'}")
     print(f"  Arial Bold    : {ck+' found' if ARIAL_BOLD.exists() else xk+' NOT FOUND'}")
     print(f"  PyMuPDF       : {ck if HAS_FITZ else xk+' pip install pymupdf'}")
@@ -2140,4 +2812,8 @@ _startup_log()  # runs on every gunicorn worker import, not just __main__
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
+<<<<<<< HEAD
     app.run(debug=False, host="0.0.0.0", port=port)
+=======
+    app.run(debug=False, host="0.0.0.0", port=port)
+>>>>>>> 5e42312dcd1687d7a9c19228843c00fd9ba8b09e
