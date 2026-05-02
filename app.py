@@ -75,11 +75,8 @@ def _options_handler(subpath=""):
 BASE_DIR               = Path(__file__).parent
 TEMPLATE_PDF_HEBRON    = BASE_DIR / "template_id_card.pdf"
 TEMPLATE_PDF_REDEEMER  = BASE_DIR / "template_redeemer.pdf"
-<<<<<<< HEAD
 TEMPLATE_PDF_PRIYANKA  = BASE_DIR / "template_priyanka.pdf"
 TEMPLATE_PDF_AB_ASCENT = BASE_DIR / "template_ab_ascent.pdf"
-=======
->>>>>>> 5e42312dcd1687d7a9c19228843c00fd9ba8b09e
 ANTON_FONT             = BASE_DIR / "Anton-Regular.ttf"
 ARIAL_BOLD             = BASE_DIR / "arialbd.ttf"
 FALLBACK_PHOTO         = BASE_DIR / "student_photo.jpg"
@@ -119,7 +116,6 @@ TEMPLATE_CONFIGS = {
             "mobile", "session", "photo_url", "adm_no",
         ],
     },
-<<<<<<< HEAD
     "priyanka": {
         "key": "priyanka",
         "label": "Priyanka",
@@ -144,8 +140,6 @@ TEMPLATE_CONFIGS = {
             "mobile", "session", "photo_url", "adm_no",
         ],
     },
-=======
->>>>>>> 5e42312dcd1687d7a9c19228843c00fd9ba8b09e
 }
 
 API_BASE_URL = "https://titusattendence.com/apikey/apistudents?school_id={school_id}"
@@ -1738,7 +1732,6 @@ def draw_card_overlay_redeemer(page, student: dict, tr):
     )
 
 
-<<<<<<< HEAD
 # ─────────────────────────────────────────────────────────────────
 # PRIYANKA DREAMNEST overlay
 # Coordinates from PRIYANKA_DREAMNEST.txt
@@ -2075,14 +2068,6 @@ def draw_card_on_page(page, student: dict, target_rect, template_key: str, templ
         draw_card_overlay_ab_ascent(page, student, tr)
     else:
         print(f"DEBUG: WRONG PATH - falling to hebron for key={template_key!r}")
-=======
-def draw_card_on_page(page, student: dict, target_rect, template_key: str, template_doc, template_source_rect):
-    page.show_pdf_page(target_rect, template_doc, 0, keep_proportion=False, overlay=True)
-    tr = _make_card_transform(template_source_rect, target_rect)
-    if template_key == "redeemer":
-        draw_card_overlay_redeemer(page, student, tr)
-    else:
->>>>>>> 5e42312dcd1687d7a9c19228843c00fd9ba8b09e
         draw_card_overlay_hebron(page, student, tr)
 
 # ─────────────────────────────────────────────────────────────────
@@ -2156,7 +2141,6 @@ ROW_STEP   = CARD_H_PT + ROW_GAP_PT   # precomputed once
 #   4. gc.collect() once per batch, not once per page.
 # ─────────────────────────────────────────────────────────────────
 
-<<<<<<< HEAD
 def _render_priyanka_card_bytes(student: dict, tmpl_bytes: bytes) -> bytes | None:
     """
     Render one Priyanka student card as PDF bytes.
@@ -2381,22 +2365,10 @@ def build_pdf_file_vector(students: list, template_key: str = DEFAULT_TEMPLATE) 
     the template, then place the result via show_pdf_page. This is the ONLY way
     to reliably erase the sample text baked into those templates, because
     apply_redactions() only works on native (non-XObject) page text.
-=======
-def build_pdf_file_vector(students: list, template_key: str = DEFAULT_TEMPLATE) -> str | None:
-    """
-    Build the final output PDF using a shared template XObject plus direct vector
-    drawing on the destination A4 page. This avoids creating an intermediate
-    1-page PDF per student, which previously prevented PyMuPDF from deduplicating
-    the template background across cards.
-
-    Result: much lower peak RAM, fewer PDF objects, and a substantially smaller
-    output file on low-memory Render instances.
->>>>>>> 5e42312dcd1687d7a9c19228843c00fd9ba8b09e
     """
     if not HAS_FITZ:
         return None
     template_key = normalize_template_key(template_key)
-<<<<<<< HEAD
     print(f"DEBUG build_pdf_file_vector: template_key={template_key!r}, students={len(students)}")
     tmpl_bytes = _ensure_template(template_key)
     if tmpl_bytes is None:
@@ -2406,11 +2378,6 @@ def build_pdf_file_vector(students: list, template_key: str = DEFAULT_TEMPLATE) 
     template_doc = _get_template_doc(template_key)
     if template_doc is None:
         print(f"DEBUG: template doc missing for {template_key}")
-=======
-    template_doc = _get_template_doc(template_key)
-    if template_doc is None:
-        print(f"DEBUG: Template PDF not found for {template_key} — using raster fallback")
->>>>>>> 5e42312dcd1687d7a9c19228843c00fd9ba8b09e
         return None
 
     source_rect = fitz.Rect(template_doc[0].rect)
@@ -2420,13 +2387,10 @@ def build_pdf_file_vector(students: list, template_key: str = DEFAULT_TEMPLATE) 
     out_path = tmp.name
     GC_EVERY_PAGES = 20
 
-<<<<<<< HEAD
     # For priyanka/ab_ascent use per-card rendering
     use_per_card = template_key in ("priyanka", "ab_ascent")
     print(f"DEBUG: use_per_card={use_per_card}")
 
-=======
->>>>>>> 5e42312dcd1687d7a9c19228843c00fd9ba8b09e
     out_doc = fitz.open()
     try:
         for page_idx in range(n_pages):
@@ -2438,15 +2402,10 @@ def build_pdf_file_vector(students: list, template_key: str = DEFAULT_TEMPLATE) 
             for idx, student in enumerate(student_batch):
                 col = idx % COLS
                 row = idx // COLS
-<<<<<<< HEAD
-=======
-
->>>>>>> 5e42312dcd1687d7a9c19228843c00fd9ba8b09e
                 card_x = OX_PT + col * COL_STEP
                 card_y = OY_PT + row * ROW_STEP
                 target_rect = fitz.Rect(card_x, card_y, card_x + CARD_W_PT, card_y + CARD_H_PT)
 
-<<<<<<< HEAD
                 if use_per_card:
                     # Render card as independent PDF, then place on A4
                     if template_key == "priyanka":
@@ -2466,27 +2425,14 @@ def build_pdf_file_vector(students: list, template_key: str = DEFAULT_TEMPLATE) 
                         a4_page, student, target_rect, template_key,
                         template_doc=template_doc, template_source_rect=source_rect,
                     )
-=======
-                draw_card_on_page(
-                    a4_page, student, target_rect, template_key,
-                    template_doc=template_doc, template_source_rect=source_rect,
-                )
->>>>>>> 5e42312dcd1687d7a9c19228843c00fd9ba8b09e
 
                 if row < ROWS - 1:
                     gap_top = card_y + CARD_H_PT
                     badge_cx = card_x + CARD_W_PT / 2.0
                     badge_cy = gap_top + ROW_GAP_PT / 2.0
                     draw_serial_badge_vector(
-<<<<<<< HEAD
                         a4_page, student_start + idx + 1,
                         badge_cx, badge_cy, ROW_GAP_PT,
-=======
-                        a4_page,
-                        student_start + idx + 1,
-                        badge_cx, badge_cy,
-                        ROW_GAP_PT,
->>>>>>> 5e42312dcd1687d7a9c19228843c00fd9ba8b09e
                     )
 
             if (page_idx + 1) % GC_EVERY_PAGES == 0:
@@ -2501,13 +2447,9 @@ def build_pdf_file_vector(students: list, template_key: str = DEFAULT_TEMPLATE) 
         print(f"DEBUG: PDF saved ({os.path.getsize(out_path)//1024} KB)")
         return out_path
 
-<<<<<<< HEAD
     except Exception as e:
         print(f"DEBUG: build_pdf_file_vector EXCEPTION: {e}")
         import traceback; traceback.print_exc()
-=======
-    except Exception:
->>>>>>> 5e42312dcd1687d7a9c19228843c00fd9ba8b09e
         try:
             if os.path.exists(out_path):
                 os.unlink(out_path)
@@ -2659,7 +2601,6 @@ def send_generated_pdf(students, dpi, download_name, as_attachment, allow_extern
 # TEMPLATE API
 # ─────────────────────────────────────────────────────────────────
 
-<<<<<<< HEAD
 TEMPLATE_BRAND_COLORS = {
     "hebron":    "#DC2626",
     "redeemer":  "#4F46E5",
@@ -2667,8 +2608,6 @@ TEMPLATE_BRAND_COLORS = {
     "ab_ascent": "#224499",
 }
 
-=======
->>>>>>> 5e42312dcd1687d7a9c19228843c00fd9ba8b09e
 @app.route("/api/templates", methods=["GET"])
 @app.route("/templates", methods=["GET"])
 def get_templates():
@@ -2680,10 +2619,7 @@ def get_templates():
             "display_name": template["display_name"],
             "description": template["description"],
             "fields": template["fields"],
-<<<<<<< HEAD
             "color": TEMPLATE_BRAND_COLORS.get(key, "#4F46E5"),
-=======
->>>>>>> 5e42312dcd1687d7a9c19228843c00fd9ba8b09e
             "preview_url": f"/api/templates/{key}/preview.png",
         })
     return jsonify(payload)
@@ -2795,11 +2731,8 @@ def _startup_log():
     print("  ID Card Generator  v2.1  (vector-native, gunicorn-ready)")
     print(f"  Hebron PDF    : {ck+' found' if TEMPLATE_PDF_HEBRON.exists() else xk+' NOT FOUND — raster fallback'}")
     print(f"  Redeemer PDF  : {ck+' found' if TEMPLATE_PDF_REDEEMER.exists() else xk+' NOT FOUND — raster fallback'}")
-<<<<<<< HEAD
     print(f"  Priyanka PDF  : {ck+' found' if TEMPLATE_PDF_PRIYANKA.exists() else xk+' NOT FOUND — using Redeemer as fallback'}")
     print(f"  Ab Ascent PDF : {ck+' found' if TEMPLATE_PDF_AB_ASCENT.exists() else xk+' NOT FOUND — using Redeemer as fallback'}")
-=======
->>>>>>> 5e42312dcd1687d7a9c19228843c00fd9ba8b09e
     print(f"  Anton font    : {ck+' found' if ANTON_FONT.exists() else xk+' NOT FOUND'}")
     print(f"  Arial Bold    : {ck+' found' if ARIAL_BOLD.exists() else xk+' NOT FOUND'}")
     print(f"  PyMuPDF       : {ck if HAS_FITZ else xk+' pip install pymupdf'}")
@@ -2812,8 +2745,4 @@ _startup_log()  # runs on every gunicorn worker import, not just __main__
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-<<<<<<< HEAD
     app.run(debug=False, host="0.0.0.0", port=port)
-=======
-    app.run(debug=False, host="0.0.0.0", port=port)
->>>>>>> 5e42312dcd1687d7a9c19228843c00fd9ba8b09e
