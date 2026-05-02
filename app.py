@@ -53,17 +53,6 @@ except ImportError:
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", os.urandom(32))
 
-# Session cookie settings — must allow cross-origin (React dev on :3000 → Flask on :5000)
-# On HTTP (local dev) SameSite must be "Lax" (browsers block Secure on http://)
-_is_https = os.environ.get("HTTPS_ENABLED", "0").strip() in ("1", "true", "yes")
-app.config.update(
-    SESSION_COOKIE_SAMESITE="None" if _is_https else "Lax",
-    SESSION_COOKIE_SECURE=_is_https,
-    SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_NAME="idcard_sid",
-    PERMANENT_SESSION_LIFETIME=int(os.environ.get("SESSION_TTL_SECONDS", str(4 * 3600))),
-)
-
 # ── Logging setup — prints to console WITH timestamp and level
 logging.basicConfig(
     level=logging.INFO,
@@ -71,28 +60,34 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("idcard")
-_ALLOWED_ORIGINS = os.environ.get(
-    "ALLOWED_ORIGINS",
-    "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001"
-).split(",")
+_RAILWAY_URL = "https://web-production-3d153.up.railway.app"
+_ALLOWED_ORIGINS = list(filter(None, [
+    _RAILWAY_URL,
+    os.environ.get("FRONTEND_URL", "").strip().rstrip("/"),
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://localhost:5000",
+] + os.environ.get("ALLOWED_ORIGINS", "").split(",")))
+# deduplicate while preserving order
+_seen = set(); _ALLOWED_ORIGINS = [x for x in _ALLOWED_ORIGINS if x and not (_seen.add(x) or x in _seen)]
 
 CORS(app,
-     origins=_ALLOWED_ORIGINS,
+     origins=["*"],
      methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-     allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
-     supports_credentials=True,
-     expose_headers=["Content-Disposition", "Content-Type", "X-Students-Count"])
+     allow_headers=["Content-Type", "Authorization", "X-Requested-With", "X-Session-ID"],
+     supports_credentials=False,
+     expose_headers=["Content-Disposition", "Content-Type", "X-Students-Count", "Content-Length"])
 
 
 @app.after_request
 def _add_cors(response):
     origin = request.headers.get("Origin", "")
-    if origin in _ALLOWED_ORIGINS:
-        response.headers["Access-Control-Allow-Origin"]   = origin
-        response.headers["Access-Control-Allow-Credentials"] = "true"
+    # Allow any origin — we use header tokens, not cookies, so no credential issues
+    response.headers["Access-Control-Allow-Origin"]   = origin or "*"
     response.headers["Access-Control-Allow-Methods"]  = "GET, POST, PUT, DELETE, OPTIONS"
-    response.headers["Access-Control-Allow-Headers"]  = "Content-Type, Authorization, X-Requested-With"
-    response.headers["Access-Control-Expose-Headers"] = "Content-Disposition, Content-Type, X-Students-Count"
+    response.headers["Access-Control-Allow-Headers"]  = "Content-Type, Authorization, X-Requested-With, X-Session-ID"
+    response.headers["Access-Control-Expose-Headers"] = "Content-Disposition, Content-Type, X-Students-Count, Content-Length"
     response.headers["Connection"] = "keep-alive"
     response.headers["Cache-Control"] = "no-store"
     return response
@@ -202,7 +197,15 @@ def _prune_old_sessions():
             del _session_stores[sid]
 
 def _get_session_id() -> str:
-    """Return (and set) a stable session id for this browser client."""
+    """
+    Return a stable session id for this client.
+    Priority: X-Session-ID header (sent by frontend JS) → fallback to cookie.
+    Using a header avoids ALL SameSite/CORS cookie issues across ports and domains.
+    """
+    sid = request.headers.get("X-Session-ID", "").strip()
+    if sid and len(sid) >= 8:
+        return sid
+    # Fallback: Flask cookie session (works when same-origin)
     if "sid" not in flask_session:
         flask_session["sid"] = uuid.uuid4().hex
         flask_session.permanent = True
@@ -577,11 +580,22 @@ def _post_clean_student(s: dict) -> dict:
     return s
 
 def parse_file(file_path, filename):
-    fn = filename.lower()
+    fn = (filename or "").lower()
     if fn.endswith(".csv"):
-        df = pd.read_csv(file_path)
+        df = None
+        for enc in ("utf-8-sig", "utf-8", "latin-1", "cp1252"):
+            try:
+                df = pd.read_csv(file_path, encoding=enc, dtype=str)
+                break
+            except Exception:
+                continue
+        if df is None:
+            raise ValueError("Could not decode CSV — try saving as UTF-8 in Excel")
     else:
-        df = pd.read_excel(file_path)
+        try:
+            df = pd.read_excel(file_path, dtype=str)
+        except Exception:
+            df = pd.read_excel(file_path, dtype=str, engine="openpyxl")
     df.columns = [norm_key(c) for c in df.columns]
     students = []
     for _, row in df.iterrows():
@@ -678,24 +692,34 @@ def get_schools():
 @app.route("/upload", methods=["POST"])
 def upload_file():
     if "file" not in request.files:
-        return jsonify({"error": "No file"}), 400
+        return jsonify({"error": "No file attached. Please choose a file."}), 400
     f = request.files["file"]
+    if not f or not f.filename:
+        return jsonify({"error": "Empty file name"}), 400
+    fname = f.filename.strip()
+    ext = Path(fname).suffix.lower()
+    if ext not in (".xlsx", ".xls", ".csv"):
+        return jsonify({"error": f"Unsupported file type '{ext}'. Please upload .xlsx, .xls or .csv"}), 400
     tmp_path = None
     try:
-        suffix = Path(f.filename or "upload.xlsx").suffix or ".xlsx"
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
             tmp_path = tmp.name
             f.save(tmp_path)
-        students = parse_file(tmp_path, f.filename)
+        students = parse_file(tmp_path, fname)
+        if not students:
+            return jsonify({"error": "No student rows found in the file. Check column headers."}), 400
         replace_store(students, "file", "Uploaded File")
+        log.info("Upload: %d students from '%s'", len(students), fname)
         return jsonify({
             "success": True,
             "count": len(students),
+            "school_name": "Uploaded File",
             "classes": _classes_summary(students),
             "session": students[0].get("session", DEFAULT_SESSION) if students else DEFAULT_SESSION,
         })
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        log.error("Upload error: %s\n%s", e, traceback.format_exc())
+        return jsonify({"error": f"Could not parse file: {e}"}), 500
     finally:
         if tmp_path and os.path.exists(tmp_path):
             try: os.unlink(tmp_path)
@@ -2554,14 +2578,22 @@ def send_generated_pdf(students, dpi, download_name, as_attachment, allow_extern
             log.warning("External storage upload failed (falling back to direct): %s", e)
 
     log.info("Sending PDF to client: %s  attachment=%s", download_name, as_attachment)
-    return send_file(
+    try:
+        file_size = os.path.getsize(pdf_path)
+    except Exception:
+        file_size = None
+
+    resp = send_file(
         pdf_path,
         mimetype="application/pdf",
         as_attachment=as_attachment,
         download_name=download_name,
-        conditional=True,
+        conditional=False,
         max_age=0,
     )
+    if file_size:
+        resp.headers["Content-Length"] = str(file_size)
+    return resp
 
 # ─────────────────────────────────────────────────────────────────
 # TEMPLATE API
