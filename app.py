@@ -1717,31 +1717,50 @@ def _render_priyanka_card_bytes(student: dict, tmpl_bytes: bytes):
     # PAD = 2.2 pt inner padding so photo stays inside the pink rounded container
     PAD = 2.2
     BOX_X, BOX_Y, BOX_W, BOX_H = 46.34, 57.75, 49.92, 63.95
-    # Step 1: Erase the template's embedded placeholder photo with a white fill
-    photo_erase_rect = fitz.Rect(BOX_X - 0.5, BOX_Y - 0.5, BOX_X + BOX_W + 0.5, BOX_Y + BOX_H + 0.5)
-    page.add_redact_annot(photo_erase_rect, fill=(1.0, 1.0, 1.0))
+    # Step 1: Erase ONLY the inner photo area — NOT the full BOX — so the
+    # template's pink rounded-rectangle border ring (which is a vector drawing
+    # that lives on the BOX boundary) is completely untouched.
+    # The pink border visually occupies roughly the outer PAD ring of the BOX.
+    # We erase only the inner rect (inset by PAD on all sides).
+    # We use a white shape draw (not a redact annotation with fill color) to
+    # avoid the solid colored rectangle that redact annotations paint over vectors.
+    _inner_erase_x0 = BOX_X + PAD
+    _inner_erase_y0 = BOX_Y + PAD
+    _inner_erase_x1 = BOX_X + BOX_W - PAD
+    _inner_erase_y1 = BOX_Y + BOX_H - PAD
+    _erase_shape = page.new_shape()
+    _erase_shape.draw_rect(fitz.Rect(_inner_erase_x0, _inner_erase_y0,
+                                     _inner_erase_x1, _inner_erase_y1))
+    _erase_shape.finish(color=(1, 1, 1), fill=(1, 1, 1), width=0)
+    _erase_shape.commit(overlay=True)
+    # Redact embedded raster image pixels inside the inner area only
+    page.add_redact_annot(
+        fitz.Rect(_inner_erase_x0, _inner_erase_y0, _inner_erase_x1, _inner_erase_y1),
+        fill=None
+    )
     page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_PIXELS)
 
-    # Step 2: Fetch and insert student photo with rounded corners (from PRIYANKA_DREAMNEST.txt)
-    # The template's own pink rounded rectangle border is preserved — we do NOT draw any border.
-    # Code exactly mirrors PRIYANKA_DREAMNEST.txt render_id_card() Step 2:
-    #   photo_fit = fit_photo_to_box(photo, int(box_w * 8), int(box_h * 8))
-    #   photo_fit = apply_rounded_corners(photo_fit, radius=int(box_w * 8 * 0.08))
+    # Step 2: Fetch and insert student photo with rounded corners.
+    # The photo rect matches exactly the inner erase area from Step 1.
+    # PAD = 2.2 pt so the photo sits inside the pink rounded border ring.
     box_inner_w = BOX_W - 2 * PAD
     box_inner_h = BOX_H - 2 * PAD
+    # Use the same boundary as the erase rect so the photo perfectly fills
+    # the cleared area without any gap or overlap with the pink border.
     photo_inner_rect = fitz.Rect(BOX_X + PAD, BOX_Y + PAD,
-                                  BOX_X + PAD + box_inner_w, BOX_Y + PAD + box_inner_h)
+                                  BOX_X + BOX_W - PAD, BOX_Y + BOX_H - PAD)
     photo_bytes = fetch_photo_bytes(student.get("photo_url", ""))
     if photo_bytes and HAS_PIL:
         try:
             scale = 8
-            target_w = max(1, int(box_inner_w * scale))
-            target_h = max(1, int(box_inner_h * scale))
+            target_w = max(1, int(round(box_inner_w * scale)))
+            target_h = max(1, int(round(box_inner_h * scale)))
+            target_ratio = target_w / target_h
             with Image.open(io.BytesIO(photo_bytes)) as _img:
                 _rgb = _img.convert("RGB")
                 src_w, src_h = _rgb.size
-                target_ratio = target_w / target_h
                 src_ratio = src_w / src_h
+                # Center-crop to target aspect ratio
                 if src_ratio > target_ratio:
                     new_w = int(src_h * target_ratio)
                     left = (src_w - new_w) // 2
@@ -1751,27 +1770,33 @@ def _render_priyanka_card_bytes(student: dict, tmpl_bytes: bytes):
                     top = (src_h - new_h) // 2
                     _rgb = _rgb.crop((0, top, src_w, top + new_h))
                 _resized = _rgb.resize((target_w, target_h), Image.Resampling.LANCZOS)
-                _rgb.close()
-            # apply_rounded_corners: radius = int(box_inner_w * scale * 0.08)
-            _radius = int(box_inner_w * scale * 0.08)
+                if _rgb is not _img:
+                    _rgb.close()
+            # Apply rounded-corner alpha mask so photo corners match pink container.
+            # radius = 8% of the inner width at 8× scale
+            _radius = max(4, int(box_inner_w * scale * 0.08))
             _rgba = _resized.convert("RGBA")
             _resized.close()
             _mask = Image.new("L", (target_w, target_h), 0)
             from PIL import ImageDraw as _IDraw
             _md = _IDraw.Draw(_mask)
-            _md.rounded_rectangle((0, 0, target_w, target_h), radius=_radius, fill=255)
+            _md.rounded_rectangle((0, 0, target_w - 1, target_h - 1),
+                                   radius=_radius, fill=255)
             _rgba.putalpha(_mask)
             _buf = io.BytesIO()
             _rgba.save(_buf, format="PNG")
             _rgba.close()
+            _mask.close()
+            # Insert as PNG so alpha channel (rounded corners) is respected
             page.insert_image(photo_inner_rect, stream=_buf.getvalue(),
                               keep_proportion=False, overlay=True)
         except Exception:
+            # Fallback: insert JPEG without rounded corners
             insert_image_safe(page, photo_inner_rect, photo_bytes)
     else:
         insert_image_safe(page, photo_inner_rect, photo_bytes)
-    # NOTE: NO border drawn here — the template PDF already has the pink rounded
-    #       rectangle as a vector drawing that shows around the padded photo area.
+    # NOTE: No border is drawn here — the template PDF already has the pink rounded
+    # rectangle as a vector drawing that visually frames the padded photo area.
 
     # ── Text helper — uses PRIYANKA_DREAMNEST.txt field "x" and "y" (baseline)
     def put(text, x, baseline_y, max_width, sz=6.0, min_sz=3.5):
@@ -1907,21 +1932,58 @@ def _render_ab_ascent_card_bytes(student: dict, tmpl_bytes: bytes):
     PHOTO = (52.93, 63.01, 100.07, 116.96)
     AB_BORDER_COLOR = (0.08, 0.31, 0.86)  # blue — exact value from AB_ASCENT.txt
     AB_BORDER_WIDTH = 1.5                 # pt — exact value from AB_ASCENT.txt
+    # Half the border stroke sits outside the rect boundary in PDF drawing model.
+    # Inset the photo image by half the border width so the photo edge aligns with
+    # the inner edge of the border stroke and no photo pixel is hidden behind the line.
+    AB_BORDER_HALF = AB_BORDER_WIDTH / 2.0
 
-    # Step 1: Erase template placeholder photo (use transparent fill to avoid white frame)
-    photo_erase_rect = fitz.Rect(PHOTO[0] - 0.5, PHOTO[1] - 0.5, PHOTO[2] + 0.5, PHOTO[3] + 0.5)
-    page.add_redact_annot(photo_erase_rect, fill=None)   # transparent — no white bleed
+    # Step 1: Erase the template's placeholder photo area.
+    # Draw a white fill shape first so no old placeholder colour bleeds through,
+    # then apply image-pixel redaction to clear any embedded raster placeholder.
+    _ab_erase_shape = page.new_shape()
+    _ab_erase_shape.draw_rect(fitz.Rect(PHOTO[0] - 1.0, PHOTO[1] - 1.0,
+                                         PHOTO[2] + 1.0, PHOTO[3] + 1.0))
+    _ab_erase_shape.finish(color=(1, 1, 1), fill=(1, 1, 1), width=0)
+    _ab_erase_shape.commit(overlay=True)
+    # Redact any embedded image pixels in the photo zone
+    page.add_redact_annot(
+        fitz.Rect(PHOTO[0] - 1.0, PHOTO[1] - 1.0, PHOTO[2] + 1.0, PHOTO[3] + 1.0),
+        fill=None
+    )
     page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_PIXELS)
 
-    # Step 2: Insert student photo
+    # Step 2: Insert student photo.
+    # The photo rect is inset by half the border width on every side so that the
+    # visible photo content is not obscured by the border stroke drawn in Step 3.
+    photo_insert_rect = fitz.Rect(
+        PHOTO[0] + AB_BORDER_HALF,
+        PHOTO[1] + AB_BORDER_HALF,
+        PHOTO[2] - AB_BORDER_HALF,
+        PHOTO[3] - AB_BORDER_HALF,
+    )
     photo_bytes = fetch_photo_bytes(student.get("photo_url", ""))
-    insert_image_safe(page, fitz.Rect(*PHOTO), photo_bytes)
+    if photo_bytes and HAS_PIL:
+        # Center-crop to the exact photo rect aspect ratio at high resolution
+        prepared = prepare_photo_for_rect(
+            photo_bytes,
+            (photo_insert_rect.x0, photo_insert_rect.y0,
+             photo_insert_rect.x1, photo_insert_rect.y1),
+            scale=8, output_format="JPEG",
+        )
+        insert_image_safe(page, photo_insert_rect, prepared or photo_bytes)
+    else:
+        insert_image_safe(page, photo_insert_rect, photo_bytes)
 
-    # Step 3: Draw blue border ON TOP of photo exactly as AB_ASCENT.txt draw_photo_border()
+    # Step 3: Draw the blue border ON TOP of the photo.
+    # draw_rect with fill=None draws only the stroke (no fill), centered on the rect edge.
+    # We draw on the PHOTO rect (not the inset rect) so the border aligns with the
+    # template's original blue rectangle drawing.
+    # Mirrors AB_ASCENT.txt draw_photo_border() exactly:
     #   shape.draw_rect(rect); shape.finish(color=color, fill=None, width=width, closePath=True)
     _ab_shape = page.new_shape()
     _ab_shape.draw_rect(fitz.Rect(*PHOTO))
-    _ab_shape.finish(color=AB_BORDER_COLOR, fill=None, width=AB_BORDER_WIDTH, closePath=True)
+    _ab_shape.finish(color=AB_BORDER_COLOR, fill=None,
+                     width=AB_BORDER_WIDTH, closePath=True)
     _ab_shape.commit(overlay=True)
 
     # ── Text insertion helper — mirrors fit_text_to_box() from AB_ASCENT.txt
