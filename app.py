@@ -53,6 +53,17 @@ except ImportError:
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", os.urandom(32))
 
+# Session cookie settings — must allow cross-origin (React dev on :3000 → Flask on :5000)
+# On HTTP (local dev) SameSite must be "Lax" (browsers block Secure on http://)
+_is_https = os.environ.get("HTTPS_ENABLED", "0").strip() in ("1", "true", "yes")
+app.config.update(
+    SESSION_COOKIE_SAMESITE="None" if _is_https else "Lax",
+    SESSION_COOKIE_SECURE=_is_https,
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_NAME="idcard_sid",
+    PERMANENT_SESSION_LIFETIME=int(os.environ.get("SESSION_TTL_SECONDS", str(4 * 3600))),
+)
+
 # ── Logging setup — prints to console WITH timestamp and level
 logging.basicConfig(
     level=logging.INFO,
@@ -60,20 +71,28 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("idcard")
+_ALLOWED_ORIGINS = os.environ.get(
+    "ALLOWED_ORIGINS",
+    "http://localhost:3000,http://127.0.0.1:3000,http://localhost:3001"
+).split(",")
+
 CORS(app,
-     origins=["*"],
+     origins=_ALLOWED_ORIGINS,
      methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
      allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
-     supports_credentials=False,
-     expose_headers=["Content-Disposition", "Content-Type"])
+     supports_credentials=True,
+     expose_headers=["Content-Disposition", "Content-Type", "X-Students-Count"])
+
 
 @app.after_request
 def _add_cors(response):
-    response.headers["Access-Control-Allow-Origin"]   = "*"
+    origin = request.headers.get("Origin", "")
+    if origin in _ALLOWED_ORIGINS:
+        response.headers["Access-Control-Allow-Origin"]   = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
     response.headers["Access-Control-Allow-Methods"]  = "GET, POST, PUT, DELETE, OPTIONS"
     response.headers["Access-Control-Allow-Headers"]  = "Content-Type, Authorization, X-Requested-With"
-    response.headers["Access-Control-Expose-Headers"] = "Content-Disposition, Content-Type"
-    # Tell proxies (corporate WiFi) to keep the connection alive while the PDF builds
+    response.headers["Access-Control-Expose-Headers"] = "Content-Disposition, Content-Type, X-Students-Count"
     response.headers["Connection"] = "keep-alive"
     response.headers["Cache-Control"] = "no-store"
     return response
@@ -717,14 +736,16 @@ def fetch_school(school_id):
 
     students = _sort_and_index(students)
     replace_store(students, "api", SCHOOLS[school_id], school_id=school_id)
-    return jsonify({
+    resp = jsonify({
         "success": True,
         "count": len(students),
-        "school_id": school_id,          # ← returned so frontend can pass on download
+        "school_id": school_id,
         "school": SCHOOLS[school_id],
         "classes": _classes_summary(students),
         "session": students[0].get("session", DEFAULT_SESSION) if students else DEFAULT_SESSION,
     })
+    resp.headers["X-Students-Count"] = str(len(students))
+    return resp
 
 @app.route("/api/students", methods=["GET"])
 @app.route("/students", methods=["GET"])
@@ -2573,10 +2594,49 @@ def get_templates():
 @app.route("/api/templates/<template_key>/preview.png", methods=["GET"])
 @app.route("/templates/<template_key>/preview.png", methods=["GET"])
 def get_template_preview(template_key):
-    png_bytes = _get_template_preview_png(template_key)
-    if not png_bytes:
-        return jsonify({"error": "Template preview unavailable"}), 404
-    return send_file(io.BytesIO(png_bytes), mimetype="image/png", download_name=f"{normalize_template_key(template_key)}_preview.png")
+    key = normalize_template_key(template_key)
+    # Try real PDF rasterization first
+    try:
+        png_bytes = _get_template_preview_png(key)
+        if png_bytes:
+            return send_file(io.BytesIO(png_bytes), mimetype="image/png",
+                             download_name=f"{key}_preview.png")
+    except Exception as e:
+        log.warning("Template preview rasterization failed for %s: %s", key, e)
+
+    # Fallback: return a coloured SVG as image/svg+xml (browsers accept this in <img>)
+    colors = {
+        "hebron":    "#DC2626",
+        "redeemer":  "#4F46E5",
+        "priyanka":  "#0F006A",
+        "ab_ascent": "#224499",
+    }
+    labels = {
+        "hebron":    "Hebron Mission School",
+        "redeemer":  "My Redeemer Mission School",
+        "priyanka":  "Priyanka Dreamnest School",
+        "ab_ascent": "Ab Ascent School",
+    }
+    color = colors.get(key, "#4F46E5")
+    label = labels.get(key, key.replace("_", " ").title())
+    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="320" height="200" viewBox="0 0 320 200">
+  <rect width="320" height="200" rx="12" fill="{color}22"/>
+  <rect width="320" height="52" rx="0" fill="{color}"/>
+  <rect y="0" width="320" height="52" rx="12" fill="{color}"/>
+  <rect y="26" width="320" height="26" fill="{color}"/>
+  <text x="160" y="34" font-family="sans-serif" font-size="14" font-weight="bold"
+        fill="white" text-anchor="middle">{label}</text>
+  <rect x="24" y="72" width="56" height="72" rx="6" fill="{color}44"/>
+  <text x="52" y="114" font-family="sans-serif" font-size="9" fill="{color}88" text-anchor="middle">PHOTO</text>
+  <rect x="96" y="72" width="140" height="10" rx="4" fill="{color}55"/>
+  <rect x="96" y="90" width="100" height="8" rx="4" fill="{color}33"/>
+  <rect x="96" y="106" width="120" height="8" rx="4" fill="{color}33"/>
+  <rect x="96" y="122" width="80" height="8" rx="4" fill="{color}33"/>
+  <rect x="24" y="160" width="272" height="1" fill="{color}22"/>
+  <text x="160" y="182" font-family="sans-serif" font-size="9" fill="{color}66" text-anchor="middle">ID Card Template Preview</text>
+</svg>"""
+    return send_file(io.BytesIO(svg.encode()), mimetype="image/svg+xml",
+                     download_name=f"{key}_preview.svg")
 
 
 def _request_template_key():
