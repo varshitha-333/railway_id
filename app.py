@@ -149,7 +149,7 @@ CLASS_ORDER = {
 def class_sort_key(cls_str):
     return CLASS_ORDER.get(str(cls_str).strip().upper(), 99)
 
-_store = {"students": [], "source": None, "school_name": None}
+_store = {"students": [], "source": None, "school_name": None, "school_id": None}
 
 MAX_UPLOAD_MB             = int(os.environ.get("MAX_UPLOAD_MB", "12"))
 MAX_STUDENTS_PER_REQUEST  = int(os.environ.get("MAX_STUDENTS_PER_REQUEST", "1000"))
@@ -229,13 +229,14 @@ _HTTP.mount("http://",  _adapter)
 _HTTP.mount("https://", _adapter)
 
 
-def replace_store(students, source, school_name):
+def replace_store(students, source, school_name, school_id=None):
     old = _store.get("students") or []
     if isinstance(old, list):
         old.clear()
     _store["students"]    = list(students)
     _store["source"]      = source
     _store["school_name"] = school_name
+    _store["school_id"]   = school_id
     gc.collect()
 
 def filter_students_by_class(students, cls):
@@ -644,10 +645,11 @@ def fetch_school(school_id):
         return jsonify({"error": "No valid students after mapping"}), 500
 
     students = _sort_and_index(students)
-    replace_store(students, "api", SCHOOLS[school_id])
+    replace_store(students, "api", SCHOOLS[school_id], school_id=school_id)
     return jsonify({
         "success": True,
         "count": len(students),
+        "school_id": school_id,          # ← returned so frontend can pass on download
         "school": SCHOOLS[school_id],
         "classes": _classes_summary(students),
         "session": students[0].get("session", DEFAULT_SESSION) if students else DEFAULT_SESSION,
@@ -676,9 +678,11 @@ def get_status():
         if k:
             class_counts[k] = class_counts.get(k, 0) + 1
     school_name = _store.get("school_name","")
+    school_id   = _store.get("school_id")
     return jsonify({
         "loaded": True,
         "count": len(students),
+        "school_id": school_id,
         "school": school_name,
         "school_name": school_name,
         "source": _store.get("source",""),
@@ -2471,15 +2475,70 @@ def _request_template_key():
 # PDF / PREVIEW ENDPOINTS
 # ─────────────────────────────────────────────────────────────────
 
+def _get_students_or_fetch():
+    """
+    Return the in-memory student list.
+    If the store is empty (e.g. server restarted between the fetch-school call
+    and the download click), auto-refetch from the API using the school_id query
+    param.  Returns (students_list, error_response_or_None).
+    """
+    students = _store.get("students") or []
+    if students:
+        return students, None
+
+    # Try to refetch: caller may pass ?school_id=5 or we infer from template key
+    school_id_raw = request.args.get("school_id", "").strip()
+    if school_id_raw:
+        try:
+            school_id = int(school_id_raw)
+        except ValueError:
+            return [], jsonify({"error": "No students loaded and invalid school_id"}), 400
+        if school_id not in SCHOOLS:
+            return [], jsonify({"error": f"No students loaded and unknown school_id {school_id}"}), 400
+        try:
+            url = API_BASE_URL.format(school_id=school_id)
+            resp = _HTTP.get(url, timeout=30)
+            resp.raise_for_status()
+            payload = resp.json()
+        except Exception as e:
+            return [], jsonify({"error": f"No students in memory and API refetch failed: {e}"}), 500
+
+        records = None
+        if isinstance(payload, list):
+            records = payload
+        elif isinstance(payload, dict):
+            for key in ("data", "students", "records", "result", "results", "items"):
+                if key in payload and isinstance(payload[key], list):
+                    records = payload[key]; break
+            if records is None:
+                for v in payload.values():
+                    if isinstance(v, list) and v and isinstance(v[0], dict):
+                        records = v; break
+
+        if not records:
+            return [], jsonify({"error": "API refetch returned no records"}), 500
+
+        fetched = [map_api_record(r) for r in records if isinstance(r, dict)]
+        fetched = [s for s in fetched if any(v for v in s.values() if v and v != DEFAULT_SESSION)]
+        if not fetched:
+            return [], jsonify({"error": "API refetch: no valid students after mapping"}), 500
+
+        fetched = _sort_and_index(fetched)
+        replace_store(fetched, "api", SCHOOLS[school_id], school_id=school_id)
+        return fetched, None
+
+    return [], jsonify({"error": "No students loaded. Please fetch or upload students first."}), 400
+
+
 @app.route("/api/preview/all", methods=["GET"])
 @app.route("/preview/all", methods=["GET"])
 def preview_all():
     template_key, err_resp, err_code = _request_template_key()
     if err_resp:
         return err_resp, err_code
-    students = _store["students"]
-    if not students:
-        return jsonify({"error": "No students loaded"}), 400
+    students, err = _get_students_or_fetch()
+    if err:
+        return err
     cls      = request.args.get("class","").strip().upper()
     students = filter_students_by_class(students, cls)
     return send_generated_pdf(students, dpi=PREVIEW_DPI,
@@ -2492,9 +2551,9 @@ def download_all():
     template_key, err_resp, err_code = _request_template_key()
     if err_resp:
         return err_resp, err_code
-    students = _store["students"]
-    if not students:
-        return jsonify({"error": "No students loaded"}), 400
+    students, err = _get_students_or_fetch()
+    if err:
+        return err
     cls = request.args.get("class","").strip().upper()
     if cls:
         students = filter_students_by_class(students, cls)
@@ -2512,11 +2571,11 @@ def preview_student():
     template_key, err_resp, err_code = _request_template_key()
     if err_resp:
         return err_resp, err_code
-    students = _store["students"]
+    students, err = _get_students_or_fetch()
+    if err:
+        return err
     cls      = request.args.get("class","").strip().upper()
     name     = request.args.get("name","").strip().lower()
-    if not students:
-        return jsonify({"error": "No students loaded"}), 400
     matches = [s for s in students
                if s.get("class","").strip().upper() == cls
                and name == s.get("student_name","").strip().lower()]
@@ -2532,11 +2591,11 @@ def download_student():
     template_key, err_resp, err_code = _request_template_key()
     if err_resp:
         return err_resp, err_code
-    students = _store["students"]
+    students, err = _get_students_or_fetch()
+    if err:
+        return err
     cls      = request.args.get("class","").strip().upper()
     name     = request.args.get("name","").strip().lower()
-    if not students:
-        return jsonify({"error": "No students loaded"}), 400
     matches = [s for s in students
                if s.get("class","").strip().upper() == cls
                and name == s.get("student_name","").strip().lower()]
