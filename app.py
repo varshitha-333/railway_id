@@ -155,22 +155,46 @@ MAX_UPLOAD_MB             = int(os.environ.get("MAX_UPLOAD_MB", "12"))
 MAX_STUDENTS_PER_REQUEST  = int(os.environ.get("MAX_STUDENTS_PER_REQUEST", "1000"))
 PREVIEW_DPI               = int(os.environ.get("PREVIEW_DPI", "150"))
 DOWNLOAD_DPI              = int(os.environ.get("DOWNLOAD_DPI", "150"))
-# ⏱  Short timeouts → fail fast → total request time stays under WiFi proxy idle limits
-PHOTO_TIMEOUT             = (3, 5)
+# ⏱  Photo timeouts — connect 6s, read 12s. titusattendence.com can be slow.
+PHOTO_TIMEOUT             = (6, 12)
 MAX_PHOTO_BYTES           = int(os.environ.get("MAX_PHOTO_BYTES", str(4 * 1024 * 1024)))
-PDF_TEMP_DIR              = os.environ.get("PDF_TEMP_DIR", tempfile.gettempdir())
 
-# 📷  Quality bumped — 360px @ q=85 (vs 300 @ 80) — ~25% better photo, only +30% size
-PHOTO_PX           = int(os.environ.get("PHOTO_PX", "360"))
-PHOTO_JPEG_QUALITY = int(os.environ.get("PHOTO_JPEG_QUALITY", "85"))
+# 🏭  PRODUCTION MODE: set PRODUCTION=1 env var on Railway (512 MB / 0.5 CPU).
+#     Locally leave unset for full performance.
+_IS_PRODUCTION = os.environ.get("PRODUCTION", "0").strip() in ("1", "true", "yes")
 
-MAX_CACHED_PHOTOS  = int(os.environ.get("MAX_CACHED_PHOTOS", "600"))
-# 🚀  16-thread prefetch — saturates network on 0.5 CPU without thrashing
-PREFETCH_WORKERS   = int(os.environ.get("PREFETCH_WORKERS", "16"))
-# 🚀  4-thread per-card render for priyanka / ab_ascent
-CARD_RENDER_WORKERS = int(os.environ.get("CARD_RENDER_WORKERS", "4"))
+# Production: use /tmp (always writable, cleaned by OS). Local: tempfile default.
+_PROD_TMP = "/tmp"
+PDF_TEMP_DIR = os.environ.get(
+    "PDF_TEMP_DIR",
+    _PROD_TMP if _IS_PRODUCTION else tempfile.gettempdir()
+)
+# Ensure the temp dir exists and is writable; fall back to /tmp
+try:
+    os.makedirs(PDF_TEMP_DIR, exist_ok=True)
+    _test = tempfile.NamedTemporaryFile(delete=True, dir=PDF_TEMP_DIR)
+    _test.close()
+except Exception:
+    PDF_TEMP_DIR = _PROD_TMP
+    os.makedirs(PDF_TEMP_DIR, exist_ok=True)
+
+# 📷  Quality: production uses smaller photos to save RAM; local uses higher quality
+PHOTO_PX           = int(os.environ.get("PHOTO_PX", "240" if _IS_PRODUCTION else "360"))
+PHOTO_JPEG_QUALITY = int(os.environ.get("PHOTO_JPEG_QUALITY", "75" if _IS_PRODUCTION else "85"))
+
+# 🧠  Memory caps: production must stay under ~350 MB working set
+MAX_CACHED_PHOTOS   = int(os.environ.get("MAX_CACHED_PHOTOS",  "80"  if _IS_PRODUCTION else "600"))
+# Production: fewer threads — 0.5 CPU means 2 real threads is enough; local: 16
+PREFETCH_WORKERS    = int(os.environ.get("PREFETCH_WORKERS",   "4"   if _IS_PRODUCTION else "16"))
+# Production: serial per-card render avoids OOM on large batches
+CARD_RENDER_WORKERS = int(os.environ.get("CARD_RENDER_WORKERS","1"   if _IS_PRODUCTION else "4"))
 PREVIEW_EXTERNAL_THRESHOLD = int(os.environ.get("PREVIEW_EXTERNAL_THRESHOLD", "9999"))
-REDEEMER_GRAD_STEPS = int(os.environ.get("REDEEMER_GRAD_STEPS", "60"))
+REDEEMER_GRAD_STEPS = int(os.environ.get("REDEEMER_GRAD_STEPS", "30" if _IS_PRODUCTION else "60"))
+
+# 🗑  Max students per request in production — keeps peak RAM predictable
+if _IS_PRODUCTION:
+    MAX_STUDENTS_PER_REQUEST = min(MAX_STUDENTS_PER_REQUEST,
+                                   int(os.environ.get("MAX_STUDENTS_PER_REQUEST", "300")))
 
 STORAGE_BACKEND           = os.environ.get("STORAGE_BACKEND", "local").strip().lower()
 SUPABASE_URL              = os.environ.get("SUPABASE_URL", "").rstrip("/")
@@ -192,11 +216,15 @@ app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_MB * 1024 * 1024
 # ─────────────────────────────────────────────────────────────────
 _HTTP = requests.Session()
 _HTTP.headers.update({
-    "User-Agent": "IDCardGen/2.3",
+    "User-Agent": "Mozilla/5.0 (compatible; IDCardGen/2.4)",
     "Accept": "image/*,*/*;q=0.8",
     "Connection": "keep-alive",
 })
-_adapter = HTTPAdapter(pool_connections=32, pool_maxsize=64, max_retries=0)
+# Retry up to 3 times with backoff - helps with flaky school servers
+from urllib3.util.retry import Retry
+_retry = Retry(total=3, backoff_factor=0.5, status_forcelist=[500, 502, 503, 504],
+               allowed_methods=["GET"], raise_on_status=False)
+_adapter = HTTPAdapter(pool_connections=32, pool_maxsize=64, max_retries=_retry)
 _HTTP.mount("http://",  _adapter)
 _HTTP.mount("https://", _adapter)
 
@@ -499,6 +527,7 @@ def parse_file(file_path, filename):
             "blood_group":  pick(rm,"blood_group","bloodgroup","blood"),
             "gender":       pick(rm,"gender","sex"),
             "session":      pick(rm,"session",default=DEFAULT_SESSION),
+            "bus_route":    pick(rm,"bus_route","bus","bus_no","bus_number","route"),
         }
         if any(s.values()):
             students.append(_post_clean_student(s))
@@ -516,6 +545,8 @@ _API_MAP = {
     "photo_url":"photo_url","photo":"photo_url","adm_no":"adm_no",
     "admission_number":"adm_no","adm":"adm_no","reg_no":"adm_no","registration_no":"adm_no","bloodgroup":"blood_group",
     "blood":"blood_group","gender":"gender","sex":"gender",
+    "bus_route":"bus_route","bus":"bus_route","bus_no":"bus_route",
+    "bus_number":"bus_route","route":"bus_route",
 }
 
 def map_api_record(record):
@@ -523,11 +554,16 @@ def map_api_record(record):
         "student_name":"","class":"","section":"","roll":"","father_name":"",
         "mother_name":"","dob":"","address":"","mobile":"","photo_url":"",
         "adm_no":"","blood_group":"","gender":"","session":DEFAULT_SESSION,
+        "bus_route":"",
     }
     for k, v in record.items():
         internal = _API_MAP.get(k.strip().lower())
         if internal and v not in (None,"","null","NULL"):
-            out[internal] = str(v).strip()
+            val = str(v).strip()
+            # Clean photo URLs — fix escaped slashes from JSON copy-paste
+            if internal == "photo_url":
+                val = val.replace("\\/", "/")
+            out[internal] = val
     return _post_clean_student(out)
 
 # ─────────────────────────────────────────────────────────────────
@@ -847,33 +883,52 @@ def _compress_photo(pil_img) -> bytes:
 # ─────────────────────────────────────────────────────────────────
 # PHOTO FETCH — empty space when missing (NO fallback image)
 # ─────────────────────────────────────────────────────────────────
+def _clean_photo_url(url: str) -> str:
+    """
+    Sanitise a photo URL:
+      - Strip whitespace / zero-width chars
+      - Remove markdown link syntax like [domain](http://actual-url)
+      - Remove any trailing punctuation left by copy-paste
+    """
+    if not url:
+        return ""
+    url = url.strip()
+    # Handle markdown link format: [text](url)  ->  url
+    import re as _re
+    md = _re.match(r"\[.*?\]\((https?://[^)]+)\)", url)
+    if md:
+        url = md.group(1)
+    # Replace encoded backslashes that appear in JSON copy-paste
+    url = url.replace("\\/ ", "/").replace("\\/", "/")
+    # Make sure it starts with http
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return ""
+    return url.strip()
+
+
 def fetch_photo_bytes(url: str):
     """
     Returns compressed JPEG bytes, or None when the photo is missing/invalid.
     None is rendered as empty (transparent) rect on the card — no sample image.
+    Tries https with verify=True first; falls back to verify=False for self-signed certs.
     """
     if not HAS_PIL:
         return None
 
-    cache_key = (url or "").strip()
+    cache_key = _clean_photo_url((url or "").strip())
     if not cache_key:
-        return None
-
-    if not (cache_key.startswith("http://") or cache_key.startswith("https://")):
         return None
 
     found, cached = _photo_cache.get(cache_key)
     if found:
         return cached  # may legitimately be None
 
-    try:
+    def _do_fetch(verify_ssl=True):
         resp = _HTTP.get(cache_key, timeout=PHOTO_TIMEOUT, stream=True,
-                         allow_redirects=True)
+                         allow_redirects=True, verify=verify_ssl)
         resp.raise_for_status()
         ct = (resp.headers.get("Content-Type") or "").lower()
-        # Reject obvious HTML / error pages
         if "text/html" in ct:
-            _photo_cache.set(cache_key, None)
             return None
         chunks = []
         total  = 0
@@ -885,7 +940,28 @@ def fetch_photo_bytes(url: str):
                 raise ValueError("photo too large")
             chunks.append(chunk)
         resp.close()
-        with Image.open(io.BytesIO(b"".join(chunks))) as img:
+        return b"".join(chunks)
+
+    try:
+        raw = _do_fetch(verify_ssl=True)
+        if raw is None:
+            _photo_cache.set(cache_key, None)
+            return None
+    except Exception:
+        # SSL / connection error — retry without verification (handles self-signed certs)
+        try:
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            raw = _do_fetch(verify_ssl=False)
+            if raw is None:
+                _photo_cache.set(cache_key, None)
+                return None
+        except Exception:
+            _photo_cache.set(cache_key, None)
+            return None
+
+    try:
+        with Image.open(io.BytesIO(raw)) as img:
             compressed = _compress_photo(img)
         _photo_cache.set(cache_key, compressed)
         return compressed
@@ -1082,7 +1158,10 @@ def clean_card_value(text):
         return ""
     if has_html(text):           # 🚫 HTML in any field → blank
         return ""
-    if all(ch in "0-/:. " for ch in text):
+    # Only reject strings that are purely zeros with separators (e.g. "00/00/0000")
+    # Do NOT reject valid values like "2026-27" (session), "21-04-2014" (DOB), or adm_no digits.
+    digits_only = re.sub(r"[0\-/:\. ]", "", text)
+    if not digits_only and re.search(r"[1-9]", text) is None:
         return ""
     return text
 
@@ -1584,6 +1663,10 @@ def draw_card_overlay_redeemer(page, student: dict, tr):
 
 # ─────────────────────────────────────────────────────────────────
 # PRIYANKA per-card renderer
+# Coordinates taken directly from PRIYANKA_DREAMNEST.txt FIELDS map.
+# Template page size: 141.75 x 240.75 pt.
+# The template already has static label text (e.g. "Class:", "Sec:",
+# "Father's Name:", etc.) — we only erase and rewrite the VALUES.
 # ─────────────────────────────────────────────────────────────────
 def _render_priyanka_card_bytes(student: dict, tmpl_bytes: bytes):
     doc = fitz.open("pdf", tmpl_bytes)
@@ -1594,73 +1677,148 @@ def _render_priyanka_card_bytes(student: dict, tmpl_bytes: bytes):
         doc.close()
         return None
 
-    PRIY_BLUE   = (15/255, 0/255, 106/255)
+    # Colour from PRIYANKA_DREAMNEST.txt:  COLOR_DARK_BLUE = (15/255, 0/255, 106/255)
+    PRIY_BLUE = (15/255, 0/255, 106/255)
 
-    sample_rects = [
-        ( 8.13, 130.69,  112.0, 141.5),
-        (26.29, 140.0,   115.0, 149.5),
-        (109.16, 109.5,  141.0, 118.5),
-        (56.76,  154.0,  130.0, 163.0),
-        (56.76,  161.5,  130.0, 170.5),
-        (56.76,  169.5,  130.0, 178.5),
-        (56.76,  177.5,  130.0, 186.5),
-        (56.76,  185.5,  130.0, 194.5),
-        (56.76,  193.0,  130.0, 202.5),
+    # ── Redact only the sample VALUE rectangles extracted from the template
+    #    (from PRIYANKA_DREAMNEST.txt sample_value_rects).
+    #    These are tight around the sample data so NO label text is wiped.
+    sample_value_rects = [
+        # name "AARAV SHARMA"       x0=8.13  y0=130.69 x1=90.08 y1=140.73
+        ( 8.13, 130.69,  90.08, 140.73),
+        # class "NURSERY"           x0=26.29 y0=141.29 x1=52.74 y1=148.32
+        (26.29, 141.29,  52.74, 148.32),
+        # sec "A"                   x0=70.81 y0=141.29 x1=74.84 y1=148.32
+        (70.81, 141.29,  74.84, 148.32),
+        # roll "10"                 x0=96.53 y0=141.29 x1=103.41 y1=148.32
+        (96.53, 141.29, 103.41, 148.32),
+        # session "2026-27"         x0=109.16 y0=110.50 x1=128.80 y1=117.11
+        (109.16, 110.50, 128.80, 117.11),
+
+        # father "SUYASH SHARMA"    x0=56.76 y0=155.18 x1=109.17 y1=161.88
+        (56.76, 155.18, 109.17, 161.88),
+        # mother "POOJA SHARMA"     x0=56.76 y0=162.73 x1=105.50 y1=169.42
+        (56.76, 162.73, 105.50, 169.42),
+        # dob "21-04-2014"          x0=56.76 y0=170.27 x1=87.42 y1=176.97
+        (56.76, 170.27,  87.42, 176.97),
+        # addr1 "BHARKO,"           x0=56.76 y0=178.56 x1=84.73 y1=185.26
+        (56.76, 178.56,  84.73, 185.26),
+        # addr2 "AMARPUR, BANKA"    x0=56.76 y0=186.56 x1=112.37 y1=193.25
+        (56.76, 186.56, 112.37, 193.25),
+        # contact "1234567890"      x0=56.76 y0=194.35 x1=90.09 y1=201.05
+        (56.76, 194.35,  90.09, 201.05),
     ]
-    for x0, y0, x1, y1 in sample_rects:
-        page.add_redact_annot(fitz.Rect(x0, y0, x1, y1), fill=None)
+    for x0, y0, x1, y1 in sample_value_rects:
+        page.add_redact_annot(fitz.Rect(x0 - 0.3, y0 - 0.3, x1 + 0.3, y1 + 0.3), fill=None)
     page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
 
-    pad = 2.2
-    px0, py0, px1, py1 = 46.34, 57.75, 46.34+49.92, 57.75+63.95
-    photo_bytes = fetch_photo_bytes(student.get("photo_url", ""))
-    insert_image_safe(page, fitz.Rect(px0+pad, py0+pad, px1-pad, py1-pad), photo_bytes)
+    # ── Photo — from PRIYANKA_DREAMNEST.txt PHOTO_BOX
+    # PHOTO_BOX = {"x": 46.34, "y": 57.75, "w": 49.92, "h": 63.95}
+    # PAD = 2.2 pt inner padding so photo stays inside the pink rounded container
+    PAD = 2.2
+    BOX_X, BOX_Y, BOX_W, BOX_H = 46.34, 57.75, 49.92, 63.95
+    # Step 1: Erase the template's embedded placeholder photo with a white fill
+    photo_erase_rect = fitz.Rect(BOX_X - 0.5, BOX_Y - 0.5, BOX_X + BOX_W + 0.5, BOX_Y + BOX_H + 0.5)
+    page.add_redact_annot(photo_erase_rect, fill=(1.0, 1.0, 1.0))
+    page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_PIXELS)
 
+    # Step 2: Fetch and insert student photo with rounded corners (from PRIYANKA_DREAMNEST.txt)
+    # The template's own pink rounded rectangle border is preserved — we do NOT draw any border.
+    # Code exactly mirrors PRIYANKA_DREAMNEST.txt render_id_card() Step 2:
+    #   photo_fit = fit_photo_to_box(photo, int(box_w * 8), int(box_h * 8))
+    #   photo_fit = apply_rounded_corners(photo_fit, radius=int(box_w * 8 * 0.08))
+    box_inner_w = BOX_W - 2 * PAD
+    box_inner_h = BOX_H - 2 * PAD
+    photo_inner_rect = fitz.Rect(BOX_X + PAD, BOX_Y + PAD,
+                                  BOX_X + PAD + box_inner_w, BOX_Y + PAD + box_inner_h)
+    photo_bytes = fetch_photo_bytes(student.get("photo_url", ""))
+    if photo_bytes and HAS_PIL:
+        try:
+            scale = 8
+            target_w = max(1, int(box_inner_w * scale))
+            target_h = max(1, int(box_inner_h * scale))
+            with Image.open(io.BytesIO(photo_bytes)) as _img:
+                _rgb = _img.convert("RGB")
+                src_w, src_h = _rgb.size
+                target_ratio = target_w / target_h
+                src_ratio = src_w / src_h
+                if src_ratio > target_ratio:
+                    new_w = int(src_h * target_ratio)
+                    left = (src_w - new_w) // 2
+                    _rgb = _rgb.crop((left, 0, left + new_w, src_h))
+                elif src_ratio < target_ratio:
+                    new_h = int(src_w / target_ratio)
+                    top = (src_h - new_h) // 2
+                    _rgb = _rgb.crop((0, top, src_w, top + new_h))
+                _resized = _rgb.resize((target_w, target_h), Image.Resampling.LANCZOS)
+                _rgb.close()
+            # apply_rounded_corners: radius = int(box_inner_w * scale * 0.08)
+            _radius = int(box_inner_w * scale * 0.08)
+            _rgba = _resized.convert("RGBA")
+            _resized.close()
+            _mask = Image.new("L", (target_w, target_h), 0)
+            from PIL import ImageDraw as _IDraw
+            _md = _IDraw.Draw(_mask)
+            _md.rounded_rectangle((0, 0, target_w, target_h), radius=_radius, fill=255)
+            _rgba.putalpha(_mask)
+            _buf = io.BytesIO()
+            _rgba.save(_buf, format="PNG")
+            _rgba.close()
+            page.insert_image(photo_inner_rect, stream=_buf.getvalue(),
+                              keep_proportion=False, overlay=True)
+        except Exception:
+            insert_image_safe(page, photo_inner_rect, photo_bytes)
+    else:
+        insert_image_safe(page, photo_inner_rect, photo_bytes)
+    # NOTE: NO border drawn here — the template PDF already has the pink rounded
+    #       rectangle as a vector drawing that shows around the padded photo area.
+
+    # ── Text helper — uses PRIYANKA_DREAMNEST.txt field "x" and "y" (baseline)
+    def put(text, x, baseline_y, max_width, sz=6.0, min_sz=3.5):
+        val = clean_card_value(str(text) if text else "")
+        if not val:
+            return
+        fs = _fit_size(bold_obj, val, max_width, sz, min_sz)
+        page.insert_text((x, baseline_y), val,
+                         fontname=fn_bold, fontfile=bold_fn,
+                         fontsize=fs, color=PRIY_BLUE, overlay=True)
+
+    # ── Write fields using exact FIELDS map from PRIYANKA_DREAMNEST.txt:
+    #
+    # "name":    x=8.13   y=138.6  max_width=100  size=8.99
     name = clean_card_value(student.get("student_name", "")).upper()
     if name:
         sz = _fit_size(bold_obj, name, 100.0, 8.99, 4.0)
-        page.insert_text((8.13, 138.6), name, fontname=fn_bold, fontfile=bold_fn,
+        page.insert_text((8.13, 138.6), name,
+                         fontname=fn_bold, fontfile=bold_fn,
                          fontsize=sz, color=PRIY_BLUE, overlay=True)
 
-    cls  = clean_card_value(student.get("class",   "")).upper()
-    sec  = clean_card_value(student.get("section", "")).upper()
-    roll = clean_card_value(student.get("roll",    ""))
-    if cls:
-        sz = _fit_size(bold_obj, cls, 30.0, 6.0, 3.5)
-        page.insert_text((26.29, 146.8), cls, fontname=fn_bold, fontfile=bold_fn,
-                         fontsize=sz, color=PRIY_BLUE, overlay=True)
-    if sec:
-        sz = _fit_size(bold_obj, sec, 12.0, 6.0, 3.5)
-        page.insert_text((70.81, 146.8), sec, fontname=fn_bold, fontfile=bold_fn,
-                         fontsize=sz, color=PRIY_BLUE, overlay=True)
-    if roll:
-        sz = _fit_size(bold_obj, roll, 18.0, 6.0, 3.5)
-        page.insert_text((96.53, 146.8), roll, fontname=fn_bold, fontfile=bold_fn,
-                         fontsize=sz, color=PRIY_BLUE, overlay=True)
+    # "class":   x=26.29  y=146.8  max_width=30   size=6.0
+    put(student.get("class", "").upper(),   26.29, 146.8, 30.0, 6.0)
 
+    # "sec":     x=70.81  y=146.8  max_width=12   size=6.0
+    put(student.get("section", "").upper(), 70.81, 146.8, 12.0, 6.0)
+
+    # "roll":    x=96.53  y=146.8  max_width=18   size=6.0
+    put(student.get("roll", ""),            96.53, 146.8, 18.0, 6.0)
+
+    # "session": x=109.16 y=115.5  max_width=28   size=6.0  font=anton
     sess = clean_card_value(student.get("session", "")) or DEFAULT_SESSION
     sz = _fit_size(bold_obj, sess, 28.0, 6.0, 3.5)
-    page.insert_text((109.16, 115.5), sess, fontname=fn_bold, fontfile=bold_fn,
+    page.insert_text((109.16, 115.5), sess,
+                     fontname=fn_bold, fontfile=bold_fn,
                      fontsize=sz, color=PRIY_BLUE, overlay=True)
 
-    val = clean_card_value(student.get("father_name", ""))
-    if val:
-        sz = _fit_size(bold_obj, val, 80.0, 6.0, 3.5)
-        page.insert_text((56.76, 160.4), val, fontname=fn_bold, fontfile=bold_fn,
-                         fontsize=sz, color=PRIY_BLUE, overlay=True)
+    # "father":  x=56.76  y=160.4  max_width=80   size=6.0
+    put(student.get("father_name", ""),  56.76, 160.4, 80.0, 6.0)
 
-    val = clean_card_value(student.get("mother_name", ""))
-    if val:
-        sz = _fit_size(bold_obj, val, 80.0, 6.0, 3.5)
-        page.insert_text((56.76, 168.4), val, fontname=fn_bold, fontfile=bold_fn,
-                         fontsize=sz, color=PRIY_BLUE, overlay=True)
+    # "mother":  x=56.76  y=168.4  max_width=80   size=6.0
+    put(student.get("mother_name", ""),  56.76, 168.4, 80.0, 6.0)
 
-    val = clean_card_value(student.get("dob", ""))   # already DD-MM-YYYY
-    if val:
-        sz = _fit_size(bold_obj, val, 80.0, 6.0, 3.5)
-        page.insert_text((56.76, 176.4), val, fontname=fn_bold, fontfile=bold_fn,
-                         fontsize=sz, color=PRIY_BLUE, overlay=True)
+    # "dob":     x=56.76  y=176.4  max_width=80   size=6.0
+    put(student.get("dob", ""),          56.76, 176.4, 80.0, 6.0)
 
+    # "address": x=56.76  y=184.4  max_width=80   size=6.0  multiline  line_height=7.5  max_lines=2
     addr = clean_card_value(student.get("address", ""))
     if addr:
         words = addr.split()
@@ -1670,20 +1828,21 @@ def _render_priyanka_card_bytes(student: dict, tmpl_bytes: bytes):
                              fontname=fn_bold, fontfile=bold_fn,
                              fontsize=6.0, color=PRIY_BLUE, overlay=True)
 
-    val = clean_card_value(student.get("mobile", ""))
-    if val:
-        sz = _fit_size(bold_obj, val, 80.0, 6.0, 3.5)
-        page.insert_text((56.76, 200.0), val, fontname=fn_bold, fontfile=bold_fn,
-                         fontsize=sz, color=PRIY_BLUE, overlay=True)
+    # "contact": x=56.76  y=200.0  max_width=80   size=6.0
+    put(student.get("mobile", ""),       56.76, 200.0, 80.0, 6.0)
 
     buf = io.BytesIO()
-    doc.save(buf, garbage=4, deflate=True)
+    doc.save(buf, garbage=4, deflate=True, incremental=False)
     doc.close()
     return buf.getvalue()
 
 
 # ─────────────────────────────────────────────────────────────────
 # AB ASCENT per-card renderer
+# Coordinates taken directly from AB_ASCENT.txt PLACEHOLDERS map.
+# The template PDF already contains all static label text
+# (e.g. "Adm No.", "Class:", "Sec:", "Roll:", "FATHER'S NAME :" …).
+# We ONLY erase and rewrite the dynamic VALUE portions.
 # ─────────────────────────────────────────────────────────────────
 def _render_ab_ascent_card_bytes(student: dict, tmpl_bytes: bytes):
     doc = fitz.open("pdf", tmpl_bytes)
@@ -1694,77 +1853,170 @@ def _render_ab_ascent_card_bytes(student: dict, tmpl_bytes: bytes):
         doc.close()
         return None
 
+    # ── Colours (from AB_ASCENT.txt PLACEHOLDERS color_int values)
     def h(c): return ((c>>16)&0xFF)/255, ((c>>8)&0xFF)/255, (c&0xFF)/255
-    NAVY  = h(0x224499)
-    RED   = h(0xC83030)
-    WHITE_C = (1.0, 1.0, 1.0)
+    NAVY    = h(0x224499)   # all data fields
+    RED     = h(0xC83030)   # student name
+    WHITE_C = (1.0, 1.0, 1.0)  # blood group text
+    BLACK   = (0.0, 0.0, 0.0)  # bus route
 
+    # ── Redact zones — exactly covering the value bbox + max_x from
+    #    AB_ASCENT.txt PLACEHOLDERS.  y0 uses the original y0 from the
+    #    PLACEHOLDER bbox; y1 uses the original y1 + a small pad.
+    #    We do NOT touch label areas (e.g. "Adm No.", "Class:", etc.).
     redact_zones = [
-        (109.15, 105.0, 148.0, 118.5),
-        ( 25.07, 105.0,  52.0, 118.5),
-        ( 17.73, 126.0, 141.0, 138.5),
-        ( 26.46, 137.0, 115.0, 146.5),
-        ( 60.74, 153.0, 151.0, 162.5),
-        ( 60.74, 160.5, 151.0, 170.0),
-        ( 60.74, 168.0, 151.0, 177.0),
-        ( 60.74, 175.5, 151.0, 184.0),
-        ( 60.74, 183.5, 151.0, 192.0),
-        ( 60.74, 191.0, 151.0, 200.0),
-        ( 29.21, 203.5,  65.0, 211.5),
-        (110.0,   83.0, 128.0,  95.0),
+        # session     bbox y0=106.44 y1=117.44  max_x=148
+        # ✅ FIX: label "Session:" occupies y=100.2–107.5; start redact at 107.5 to protect it
+        (109.15, 107.50, 148.0,  118.50),
+        # adm_no      bbox y0=106.44 y1=117.44  max_x=50
+        # ✅ FIX: label "Adm No :" occupies y=100.2–107.5; start redact at 107.5 to protect it
+        ( 25.07, 107.50,  50.0,  118.50),
+        # name        bbox y0=127.58 y1=137.63  max_x=140
+        ( 17.73, 126.60, 140.0,  138.50),
+        # class_      bbox y0=138.40 y1=145.43  max_x=58
+        ( 26.46, 137.50,  58.0,  146.30),
+        # section     bbox y0=138.40 y1=145.43  max_x=84
+        ( 73.90, 137.50,  84.0,  146.30),
+        # roll        bbox y0=138.40 y1=145.43  max_x=115
+        (100.07, 137.50, 115.0,  146.30),
+        # father_name bbox y0=154.44 y1=161.14  max_x=150
+        ( 60.74, 153.50, 150.0,  162.00),
+        # mother_name bbox y0=161.99 y1=168.69  max_x=150
+        ( 60.74, 161.00, 150.0,  169.50),
+        # dob         bbox y0=169.25 y1=175.95  max_x=150
+        ( 60.74, 168.30, 150.0,  176.80),
+        # addr1       bbox y0=176.52 y1=183.22  max_x=150
+        ( 60.74, 175.60, 150.0,  184.10),
+        # addr2       bbox y0=184.51 y1=191.21  max_x=150
+        ( 60.74, 183.60, 150.0,  192.00),
+        # mobile      bbox y0=192.06 y1=198.76  max_x=150
+        ( 60.74, 191.10, 150.0,  199.60),
+        # bus_route   bbox y0=204.56 y1=210.70  max_x=65
+        ( 29.21, 203.60,  65.0,  211.60),
+        # blood_group bbox y0=85.52  y1=93.34   max_x=125.56
+        (116.03,  84.50, 125.56,  94.00),
     ]
     for x0, y0, x1, y1 in redact_zones:
         page.add_redact_annot(fitz.Rect(x0, y0, x1, y1), fill=None)
     page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
 
+    # ── Photo (from AB_ASCENT.txt: PHOTO_RECT and draw_photo_border)
+    # PHOTO_RECT = (52.93, 63.01, 100.07, 116.96)  x0,y0,x1,y1  (47.1 × 54.0 pt)
+    # PHOTO_BORDER_COLOR = (0.08, 0.31, 0.86)  blue
+    # PHOTO_BORDER_WIDTH = 1.5 pt
     PHOTO = (52.93, 63.01, 100.07, 116.96)
+    AB_BORDER_COLOR = (0.08, 0.31, 0.86)  # blue — exact value from AB_ASCENT.txt
+    AB_BORDER_WIDTH = 1.5                 # pt — exact value from AB_ASCENT.txt
+
+    # Step 1: Erase template placeholder photo (use transparent fill to avoid white frame)
+    photo_erase_rect = fitz.Rect(PHOTO[0] - 0.5, PHOTO[1] - 0.5, PHOTO[2] + 0.5, PHOTO[3] + 0.5)
+    page.add_redact_annot(photo_erase_rect, fill=None)   # transparent — no white bleed
+    page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_PIXELS)
+
+    # Step 2: Insert student photo
     photo_bytes = fetch_photo_bytes(student.get("photo_url", ""))
     insert_image_safe(page, fitz.Rect(*PHOTO), photo_bytes)
-    page.draw_rect(fitz.Rect(*PHOTO), color=(0.08,0.31,0.86), fill=None, width=1.5, overlay=True)
 
-    def put(text, x0, y1, color, maxw, sz=6.0, center_x1=None):
-        val = clean_card_value(text)
+    # Step 3: Draw blue border ON TOP of photo exactly as AB_ASCENT.txt draw_photo_border()
+    #   shape.draw_rect(rect); shape.finish(color=color, fill=None, width=width, closePath=True)
+    _ab_shape = page.new_shape()
+    _ab_shape.draw_rect(fitz.Rect(*PHOTO))
+    _ab_shape.finish(color=AB_BORDER_COLOR, fill=None, width=AB_BORDER_WIDTH, closePath=True)
+    _ab_shape.commit(overlay=True)
+
+    # ── Text insertion helper — mirrors fit_text_to_box() from AB_ASCENT.txt
+    #    x0, y1 = original bbox coords from PLACEHOLDERS; max_x = max_x column.
+    #    baseline = y1 - 0.22 * size  (same formula as original)
+    def put(text, x0, y1_bbox, color, max_x, sz=6.0, align="left"):
+        val = clean_card_value(str(text) if text else "")
         if not val:
             return
-        fs = _fit_size(bold_obj, val, maxw, sz * (CARD_W_PT/153.0), 3.0)
-        by = y1 - 0.22 * sz
-        if center_x1:
-            tw = bold_obj.text_length(val, fontsize=fs)
-            cx = x0 + ((center_x1 - x0) - tw) / 2.0
-            page.insert_text((cx, by), val, fontname=fn_bold, fontfile=bold_fn,
-                             fontsize=fs, color=color, overlay=True)
+        available_w = max_x - x0
+        fs = _fit_size(bold_obj, val, available_w, sz, 3.0)
+        tw = bold_obj.text_length(val, fontsize=fs)
+        if align == "center":
+            x = x0 + (available_w - tw) / 2.0
         else:
-            page.insert_text((x0, by), val, fontname=fn_bold, fontfile=bold_fn,
-                             fontsize=fs, color=color, overlay=True)
+            x = x0
+        baseline = y1_bbox - 0.22 * sz
+        page.insert_text((x, baseline), val,
+                         fontname=fn_bold, fontfile=bold_fn,
+                         fontsize=fs, color=color, overlay=True)
 
-    put(student.get("session","")    or DEFAULT_SESSION, 109.15, 117.44, NAVY,  148.0-109.15, 7.5)
-    put(student.get("adm_no",""),     25.07, 117.44, NAVY,   50.0-25.07, 7.5)
-    put(student.get("student_name","").upper(), 17.73, 137.63, RED, 140.0-17.73, 9.0)
-    put(student.get("class","").upper(),  26.46, 145.43, NAVY,  58.0-26.46, 6.0)
-    put(student.get("section","").upper(), 73.90, 145.43, NAVY, 84.0-73.90, 6.0)
-    put(student.get("roll",""),      100.07, 145.43, NAVY, 115.0-100.07, 6.0)
-    put(student.get("father_name",""), 60.74, 161.14, NAVY, 150.0-60.74, 6.0)
-    put(student.get("mother_name",""), 60.74, 168.69, NAVY, 150.0-60.74, 6.0)
-    put(student.get("dob",""),         60.74, 175.95, NAVY, 150.0-60.74, 6.0)   # already DD-MM-YYYY
-    put(student.get("mobile",""),      60.74, 198.76, NAVY, 150.0-60.74, 6.0)
+    # ── Now write every field using EXACTLY the same bbox coords and
+    #    parameters as the PLACEHOLDERS table in AB_ASCENT.txt:
+    #
+    #  ("session",     "2026-27",        (109.15,106.44,133.71,117.44), "hebo",7.5,0x224499,"left",148.0)
+    put(student.get("session", "") or DEFAULT_SESSION,
+        109.15, 117.44, NAVY, 148.0, sz=7.5)
 
-    blood = clean_card_value(student.get("blood_group","")).upper()
+    #  ("adm_no",      "1678",           ( 25.07,106.44, 38.66,117.44), "hebo",7.5,0x224499,"left", 50.0)
+    #  Label "Adm No." starts at x=18.5 (from static_zones). Align value to same x.
+    put(student.get("adm_no", ""),
+        18.5, 117.44, NAVY, 50.0, sz=7.5)
+
+    #  ("name",        "AARAV SHARMA",   ( 17.73,127.58, 99.71,137.63), "hebo",9.0,0xC83030,"left",140.0)
+    put(student.get("student_name", "").upper(),
+        17.73, 137.63, RED, 140.0, sz=9.0)
+
+    #  ("class_",      "VI",             ( 26.46,138.40, 32.14,145.43), "hebo",6.0,0x224499,"left", 58.0)
+    put(student.get("class", "").upper(),
+        26.46, 145.43, NAVY, 58.0, sz=6.0)
+
+    #  ("section",     "A",              ( 73.90,138.40, 77.93,145.43), "hebo",6.0,0x224499,"left", 84.0)
+    put(student.get("section", "").upper(),
+        73.90, 145.43, NAVY, 84.0, sz=6.0)
+
+    #  ("roll",        "21",             (100.07,138.40,106.95,145.43), "hebo",6.0,0x224499,"left",115.0)
+    put(student.get("roll", ""),
+        100.07, 145.43, NAVY, 115.0, sz=6.0)
+
+    #  ("father_name", "SUYASH SHARMA",  ( 60.74,154.44,113.16,161.14), "hebo",6.0,0x224499,"left",150.0)
+    put(student.get("father_name", ""),
+        60.74, 161.14, NAVY, 150.0, sz=6.0)
+
+    #  ("mother_name", "POOJA SHARMA",   ( 60.74,161.99,109.49,168.69), "hebo",6.0,0x224499,"left",150.0)
+    put(student.get("mother_name", ""),
+        60.74, 168.69, NAVY, 150.0, sz=6.0)
+
+    #  ("dob",         "21-04-2014",     ( 60.74,169.25, 91.41,175.95), "hebo",6.0,0x224499,"left",150.0)
+    put(student.get("dob", ""),
+        60.74, 175.95, NAVY, 150.0, sz=6.0)
+
+    #  ("mobile",      "1234567890",     ( 60.74,192.06, 94.08,198.76), "hebo",6.0,0x224499,"left",150.0)
+    put(student.get("mobile", ""),
+        60.74, 198.76, NAVY, 150.0, sz=6.0)
+
+    #  ("blood_group", "O+",             (116.03,85.52,125.56,93.34),   "hebo",7.0,0xFFFFFF,"center",125.56)
+    blood = clean_card_value(student.get("blood_group", "")).upper()
     if blood and any(c.isalpha() for c in blood):
-        put(blood, 116.03, 93.34, WHITE_C, 125.56-116.03, 7.0, center_x1=125.56)
+        put(blood, 116.03, 93.34, WHITE_C, 125.56, sz=7.0, align="center")
 
-    addr = clean_card_value(student.get("address",""))
+    #  ("bus_route",   "BUS 1",          ( 29.21,204.56, 45.40,210.70), "hebo",5.5,0x000000,"left", 65.0)
+    bus = clean_card_value(student.get("bus_route", ""))
+    if bus:
+        put(bus, 29.21, 210.70, BLACK, 65.0, sz=5.5)
+
+    # ── ADDRESS: split into addr1 / addr2
+    #  ("addr1",       "BHARKO,",        ( 60.74,176.52, 88.72,183.22), "hebo",6.0,0x224499,"left",150.0)
+    #  ("addr2",       "AMARPUR, BANKA", ( 60.74,184.51,116.37,191.21), "hebo",6.0,0x224499,"left",150.0)
+    addr = clean_card_value(student.get("address", ""))
     if addr:
         if "," in addr:
-            l1, l2 = addr.split(",", 1)
-            l1, l2 = l1.strip()+",", l2.strip()
+            addr1, addr2 = addr.split(",", 1)
+            addr1 = addr1.strip() + ","
+            addr2 = addr2.strip()
         else:
-            w = addr.split(); m = max(1,len(w)//2)
-            l1, l2 = " ".join(w[:m]), " ".join(w[m:])
-        put(l1, 60.74, 183.22, NAVY, 150.0-60.74, 6.0)
-        put(l2, 60.74, 191.21, NAVY, 150.0-60.74, 6.0)
+            words = addr.split()
+            mid = max(1, len(words) // 2)
+            addr1 = " ".join(words[:mid])
+            addr2 = " ".join(words[mid:])
+        put(addr1, 60.74, 183.22, NAVY, 150.0, sz=6.0)
+        if addr2:
+            put(addr2, 60.74, 191.21, NAVY, 150.0, sz=6.0)
 
     buf = io.BytesIO()
-    doc.save(buf, garbage=4, deflate=True)
+    doc.save(buf, garbage=4, deflate=True, incremental=False)
     doc.close()
     return buf.getvalue()
 
@@ -1840,6 +2092,32 @@ ROW_STEP   = CARD_H_PT + ROW_GAP_PT
 # A4 SHEET BUILDER  — parallelised per-card render for priyanka/ab_ascent
 # ─────────────────────────────────────────────────────────────────
 
+def _check_tmp_space_mb(path: str, needed_mb: float = 20.0) -> bool:
+    """Return True if the directory has at least needed_mb of free space."""
+    try:
+        import shutil
+        free = shutil.disk_usage(path).free / (1024 * 1024)
+        return free >= needed_mb
+    except Exception:
+        return True  # assume ok if we can't check
+
+
+def _resolve_pdf_tmp_dir() -> str:
+    """Pick a writable temp dir with enough space. Falls back through candidates."""
+    candidates = [PDF_TEMP_DIR, "/tmp", tempfile.gettempdir()]
+    for d in candidates:
+        try:
+            os.makedirs(d, exist_ok=True)
+            if _check_tmp_space_mb(d, needed_mb=10.0):
+                # Verify we can actually write there
+                t = tempfile.NamedTemporaryFile(delete=True, dir=d, suffix=".pdf")
+                t.close()
+                return d
+        except Exception:
+            continue
+    return tempfile.gettempdir()  # last resort
+
+
 def build_pdf_file_vector(students: list, template_key: str = DEFAULT_TEMPLATE):
     if not HAS_FITZ:
         return None
@@ -1854,30 +2132,41 @@ def build_pdf_file_vector(students: list, template_key: str = DEFAULT_TEMPLATE):
 
     source_rect = fitz.Rect(template_doc[0].rect)
     n_pages = (len(students) + CARDS_PER_PAGE - 1) // CARDS_PER_PAGE
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf", dir=PDF_TEMP_DIR)
+    # ✅ FIX: Pick a writable temp dir with enough free space
+    tmp_dir = _resolve_pdf_tmp_dir()
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf", dir=tmp_dir)
     tmp.close()
     out_path = tmp.name
-    GC_EVERY_PAGES = 25
+    # Aggressive GC: every 5 pages in production, every 25 locally
+    GC_EVERY_PAGES = 5 if _IS_PRODUCTION else 25
 
     use_per_card = template_key in ("priyanka", "ab_ascent")
     render_fn = _render_priyanka_card_bytes if template_key == "priyanka" else _render_ab_ascent_card_bytes
 
-    # 🚀 Parallel per-card pre-render (CPU + I/O overlap)
+    # 🚀 Per-card pre-render: parallel locally, serial in production to save RAM
     prerendered = None
     if use_per_card:
         prerendered = [None] * len(students)
         workers = min(CARD_RENDER_WORKERS, max(1, len(students)))
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            future_to_idx = {
-                pool.submit(render_fn, students[i], tmpl_bytes): i
-                for i in range(len(students))
-            }
-            for f in as_completed(future_to_idx):
-                idx = future_to_idx[f]
+        if workers > 1:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                future_to_idx = {
+                    pool.submit(render_fn, students[i], tmpl_bytes): i
+                    for i in range(len(students))
+                }
+                for f in as_completed(future_to_idx):
+                    idx = future_to_idx[f]
+                    try:
+                        prerendered[idx] = f.result()
+                    except Exception:
+                        prerendered[idx] = None
+        else:
+            # Serial render — minimal peak RAM
+            for i, s in enumerate(students):
                 try:
-                    prerendered[idx] = f.result()
+                    prerendered[i] = render_fn(s, tmpl_bytes)
                 except Exception:
-                    prerendered[idx] = None
+                    prerendered[i] = None
 
     out_doc = fitz.open()
     try:
@@ -1901,28 +2190,39 @@ def build_pdf_file_vector(students: list, template_key: str = DEFAULT_TEMPLATE):
                         a4_page.show_pdf_page(target_rect, card_doc, 0,
                                               keep_proportion=False, overlay=True)
                         card_doc.close()
+                        # ✅ FIX: free per-card bytes immediately after use to save RAM
+                        prerendered[student_start + idx] = None
                 else:
                     draw_card_on_page(
                         a4_page, student, target_rect, template_key,
                         template_doc=template_doc, template_source_rect=source_rect,
                     )
 
-                if row < ROWS - 1:
-                    gap_top = card_y + CARD_H_PT
+                # Draw serial badge for EVERY card in the gap between rows.
+                # For row 0: badge is in the gap below (between row 0 and row 1).
+                # For row 1: badge is in the gap above (between row 0 and row 1) — same y.
+                # Both produce the same physical gap_cy so each card column gets one badge.
+                if ROWS > 1:
+                    if row == 0:
+                        # Gap below row 0
+                        gap_cy = card_y + CARD_H_PT + ROW_GAP_PT / 2.0
+                    else:
+                        # Gap above row 1 (= gap below row 0)
+                        gap_cy = card_y - ROW_GAP_PT / 2.0
                     badge_cx = card_x + CARD_W_PT / 2.0
-                    badge_cy = gap_top + ROW_GAP_PT / 2.0
                     draw_serial_badge_vector(
                         a4_page, student_start + idx + 1,
-                        badge_cx, badge_cy, ROW_GAP_PT,
+                        badge_cx, gap_cy, ROW_GAP_PT,
                     )
 
             if (page_idx + 1) % GC_EVERY_PAGES == 0:
                 gc.collect()
 
+        # ✅ FIX: save with incremental=False so MuPDF doesn't need extra tmp space
         out_doc.save(
             out_path,
             deflate=True, deflate_images=True, deflate_fonts=True,
-            garbage=4, clean=True, linear=False,
+            garbage=4, clean=True, linear=False, incremental=False,
         )
         return out_path
 
@@ -1968,7 +2268,8 @@ def build_pdf_file_raster_fallback(students, dpi=150):
     a4_w_pt  = A4_W_MM * MM_TO_PT; a4_h_pt  = A4_H_MM * MM_TO_PT
 
     out_doc  = fitz.open()
-    tmp      = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf", dir=PDF_TEMP_DIR)
+    _tmp_dir = _resolve_pdf_tmp_dir()
+    tmp      = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf", dir=_tmp_dir)
     tmp.close()
     n_pages  = (len(students) + CARDS_PER_PAGE - 1) // CARDS_PER_PAGE
 
@@ -2189,16 +2490,19 @@ def download_student():
 def _startup_log():
     ck = chr(0x2713); xk = chr(0x2717)
     print("=" * 62)
-    print("  ID Card Generator  v2.3  (fast / vector-native)")
+    print("  ID Card Generator  v2.4  (fast / vector-native)")
+    print(f"  Mode          : {'PRODUCTION (512MB/0.5CPU)' if _IS_PRODUCTION else 'LOCAL (full performance)'}")
     print(f"  Hebron PDF    : {ck+' found' if TEMPLATE_PDF_HEBRON.exists() else xk+' NOT FOUND'}")
     print(f"  Redeemer PDF  : {ck+' found' if TEMPLATE_PDF_REDEEMER.exists() else xk+' NOT FOUND'}")
     print(f"  Priyanka PDF  : {ck+' found' if TEMPLATE_PDF_PRIYANKA.exists() else xk+' NOT FOUND'}")
     print(f"  Ab Ascent PDF : {ck+' found' if TEMPLATE_PDF_AB_ASCENT.exists() else xk+' NOT FOUND'}")
     print(f"  PyMuPDF       : {ck if HAS_FITZ else xk}")
     print(f"  Pillow        : {ck if HAS_PIL  else xk}")
+    print(f"  Temp dir      : {PDF_TEMP_DIR}")
     print(f"  Photo prefetch: {PREFETCH_WORKERS} threads | timeout {PHOTO_TIMEOUT}")
-    print(f"  Card render   : {CARD_RENDER_WORKERS} threads")
+    print(f"  Card render   : {CARD_RENDER_WORKERS} thread(s)")
     print(f"  Photo quality : {PHOTO_PX}px @ JPEG q={PHOTO_JPEG_QUALITY}")
+    print(f"  Photo cache   : max {MAX_CACHED_PHOTOS} entries")
     print("=" * 62)
 
 _startup_log()
