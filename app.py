@@ -1109,7 +1109,7 @@ def prefetch_photos(students: list) -> None:
     })
     if not urls:
         return
-    workers = min(PREFETCH_WORKERS, max(4, len(urls)))
+    workers = min(PREFETCH_WORKERS, len(urls))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(fetch_photo_bytes, url) for url in urls]
         for f in as_completed(futures):
@@ -2326,49 +2326,19 @@ def build_pdf_file_vector(students: list, template_key: str = DEFAULT_TEMPLATE):
 
     source_rect = fitz.Rect(template_doc[0].rect)
     n_pages = (len(students) + CARDS_PER_PAGE - 1) // CARDS_PER_PAGE
-    # ✅ FIX: Pick a writable temp dir with enough free space
     tmp_dir = _resolve_pdf_tmp_dir()
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf", dir=tmp_dir)
     tmp.close()
     out_path = tmp.name
-    # Aggressive GC: every 5 pages in production, every 25 locally
-    GC_EVERY_PAGES = 5 if _IS_PRODUCTION else 25
+    # Aggressive GC: every 3 pages in production, every 10 locally
+    GC_EVERY_PAGES = 3 if _IS_PRODUCTION else 10
 
     use_per_card = template_key in ("priyanka", "ab_ascent")
     render_fn = _render_priyanka_card_bytes if template_key == "priyanka" else _render_ab_ascent_card_bytes
 
-    # 🚀 Per-card pre-render: parallel locally, serial in production to save RAM
-    prerendered = None
-    if use_per_card:
-        prerendered = [None] * len(students)
-        workers = min(CARD_RENDER_WORKERS, max(1, len(students)))
-        if workers > 1:
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                future_to_idx = {
-                    pool.submit(render_fn, students[i], tmpl_bytes): i
-                    for i in range(len(students))
-                }
-                for f in as_completed(future_to_idx):
-                    idx = future_to_idx[f]
-                    try:
-                        prerendered[idx] = f.result()
-                    except Exception as e:
-                        log.error("Card render FAILED for student[%d] '%s': %s\n%s",
-                                  idx,
-                                  students[idx].get("student_name", "?"),
-                                  e,
-                                  traceback.format_exc())
-                        prerendered[idx] = None
-        else:
-            # Serial render — minimal peak RAM
-            for i, s in enumerate(students):
-                try:
-                    prerendered[i] = render_fn(s, tmpl_bytes)
-                except Exception as e:
-                    log.error("Card render FAILED for student[%d] '%s': %s\n%s",
-                              i, s.get("student_name", "?"), e, traceback.format_exc())
-                    prerendered[i] = None
-
+    # ✅ KEY FIX: Process PAGE BY PAGE — never hold more than CARDS_PER_PAGE (10)
+    # card PDFs in memory at once. Previous code held ALL N cards simultaneously,
+    # causing OOM for 488 students (~100 MB of card bytes before output doc).
     out_doc = fitz.open()
     try:
         for page_idx in range(n_pages):
@@ -2376,6 +2346,35 @@ def build_pdf_file_vector(students: list, template_key: str = DEFAULT_TEMPLATE):
             student_batch = students[student_start: student_start + CARDS_PER_PAGE]
 
             a4_page = out_doc.new_page(width=A4_W_PT, height=A4_H_PT)
+
+            if use_per_card:
+                # Render only this page's cards (≤10), use immediately, free immediately.
+                # Workers capped at CARDS_PER_PAGE — no point in more.
+                batch_workers = min(CARD_RENDER_WORKERS, len(student_batch))
+                if batch_workers > 1:
+                    batch_rendered = [None] * len(student_batch)
+                    with ThreadPoolExecutor(max_workers=batch_workers) as pool:
+                        fut_map = {
+                            pool.submit(render_fn, student_batch[i], tmpl_bytes): i
+                            for i in range(len(student_batch))
+                        }
+                        for f in as_completed(fut_map):
+                            bi = fut_map[f]
+                            try:
+                                batch_rendered[bi] = f.result()
+                            except Exception as e:
+                                log.error("Card render FAILED student[%d] '%s': %s",
+                                          student_start + bi,
+                                          student_batch[bi].get("student_name", "?"), e)
+                                batch_rendered[bi] = None
+                else:
+                    batch_rendered = []
+                    for s in student_batch:
+                        try:
+                            batch_rendered.append(render_fn(s, tmpl_bytes))
+                        except Exception as e:
+                            log.error("Card render FAILED '%s': %s", s.get("student_name","?"), e)
+                            batch_rendered.append(None)
 
             for idx, student in enumerate(student_batch):
                 col = idx % COLS
@@ -2385,30 +2384,23 @@ def build_pdf_file_vector(students: list, template_key: str = DEFAULT_TEMPLATE):
                 target_rect = fitz.Rect(card_x, card_y, card_x + CARD_W_PT, card_y + CARD_H_PT)
 
                 if use_per_card:
-                    card_bytes = prerendered[student_start + idx]
+                    card_bytes = batch_rendered[idx]
                     if card_bytes:
                         card_doc = fitz.open("pdf", card_bytes)
                         a4_page.show_pdf_page(target_rect, card_doc, 0,
                                               keep_proportion=False, overlay=True)
                         card_doc.close()
-                        # ✅ FIX: free per-card bytes immediately after use to save RAM
-                        prerendered[student_start + idx] = None
+                    batch_rendered[idx] = None  # free immediately
                 else:
                     draw_card_on_page(
                         a4_page, student, target_rect, template_key,
                         template_doc=template_doc, template_source_rect=source_rect,
                     )
 
-                # Draw serial badge for EVERY card in the gap between rows.
-                # For row 0: badge is in the gap below (between row 0 and row 1).
-                # For row 1: badge is in the gap above (between row 0 and row 1) — same y.
-                # Both produce the same physical gap_cy so each card column gets one badge.
                 if ROWS > 1:
                     if row == 0:
-                        # Gap below row 0
                         gap_cy = card_y + CARD_H_PT + ROW_GAP_PT / 2.0
                     else:
-                        # Gap above row 1 (= gap below row 0)
                         gap_cy = card_y - ROW_GAP_PT / 2.0
                     badge_cx = card_x + CARD_W_PT / 2.0
                     draw_serial_badge_vector(
@@ -2416,10 +2408,14 @@ def build_pdf_file_vector(students: list, template_key: str = DEFAULT_TEMPLATE):
                         badge_cx, gap_cy, ROW_GAP_PT,
                     )
 
+            # Free the per-page batch immediately
+            if use_per_card:
+                batch_rendered.clear()
+                del batch_rendered
+
             if (page_idx + 1) % GC_EVERY_PAGES == 0:
                 gc.collect()
 
-        # ✅ FIX: save with incremental=False so MuPDF doesn't need extra tmp space
         out_doc.save(
             out_path,
             deflate=True, deflate_images=True, deflate_fonts=True,
@@ -2437,9 +2433,6 @@ def build_pdf_file_vector(students: list, template_key: str = DEFAULT_TEMPLATE):
         raise
     finally:
         out_doc.close()
-        # Free per-card byte buffers ASAP
-        if prerendered:
-            prerendered.clear()
         gc.collect()
 
 # ─────────────────────────────────────────────────────────────────
@@ -2554,16 +2547,6 @@ def send_generated_pdf(students, dpi, download_name, as_attachment, allow_extern
     except Exception as e:
         log.error("Could not stat PDF file: %s", e)
 
-    @after_this_request
-    def cleanup(response):
-        try:
-            if os.path.exists(pdf_path):
-                os.unlink(pdf_path)
-        except Exception:
-            pass
-        gc.collect()
-        return response
-
     if allow_external and _external_storage_enabled():
         try:
             remote_url = upload_pdf_to_external_storage(pdf_path, download_name)
@@ -2583,17 +2566,44 @@ def send_generated_pdf(students, dpi, download_name, as_attachment, allow_extern
     except Exception:
         file_size = None
 
-    resp = send_file(
-        pdf_path,
-        mimetype="application/pdf",
-        as_attachment=as_attachment,
-        download_name=download_name,
-        conditional=False,
-        max_age=0,
-    )
+    # ✅ KEY FIX: Stream in 512KB chunks — never buffer the whole PDF in RAM.
+    # Also safely deletes the temp file after streaming finishes.
+    CHUNK = 512 * 1024
+
+    def _stream_and_delete(path):
+        try:
+            with open(path, "rb") as fh:
+                while True:
+                    chunk = fh.read(CHUNK)
+                    if not chunk:
+                        break
+                    yield chunk
+        finally:
+            try:
+                if os.path.exists(path):
+                    os.unlink(path)
+            except Exception:
+                pass
+            gc.collect()
+
+    from flask import Response as _FlaskResponse
+    headers = {
+        "Content-Type": "application/pdf",
+        "Cache-Control": "no-store",
+        "X-Accel-Buffering": "no",
+    }
+    safe = _sanitize_filename(download_name)
+    disp = "attachment" if as_attachment else "inline"
+    headers["Content-Disposition"] = disp + '; filename="' + safe + '"'
     if file_size:
-        resp.headers["Content-Length"] = str(file_size)
-    return resp
+        headers["Content-Length"] = str(file_size)
+
+    return _FlaskResponse(
+        _stream_and_delete(pdf_path),
+        status=200,
+        headers=headers,
+        direct_passthrough=True,
+    )
 
 # ─────────────────────────────────────────────────────────────────
 # TEMPLATE API
