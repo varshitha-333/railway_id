@@ -27,7 +27,10 @@ from pathlib import Path
 from datetime import datetime
 from collections import defaultdict, OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from flask import Flask, request, jsonify, send_file, after_this_request
+import time
+import traceback
+import logging
+from flask import Flask, request, jsonify, send_file, after_this_request, session as flask_session
 from flask_cors import CORS
 from requests.adapters import HTTPAdapter
 import pandas as pd
@@ -48,6 +51,15 @@ except ImportError:
 
 # ─────────────────────────────────────────────────────────────────
 app = Flask(__name__)
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", os.urandom(32))
+
+# ── Logging setup — prints to console WITH timestamp and level
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger("idcard")
 CORS(app,
      origins=["*"],
      methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
@@ -149,10 +161,62 @@ CLASS_ORDER = {
 def class_sort_key(cls_str):
     return CLASS_ORDER.get(str(cls_str).strip().upper(), 99)
 
-_store = {"students": [], "source": None, "school_name": None, "school_id": None}
+_store = {}  # legacy — kept for import compatibility; actual state is in _session_stores
+
+# ─────────────────────────────────────────────────────────────────
+# PER-SESSION STORE  — each browser tab/user gets their own data
+# ─────────────────────────────────────────────────────────────────
+# _session_stores[session_id] = {"students":[], "source":None,
+#                                "school_name":None, "school_id":None,
+#                                "last_active": timestamp}
+_session_stores: dict = {}
+_session_lock = threading.Lock()
+SESSION_TTL_SECONDS = int(os.environ.get("SESSION_TTL_SECONDS", str(4 * 3600)))  # 4 hours default
+
+def _prune_old_sessions():
+    """Remove sessions that haven't been active for SESSION_TTL_SECONDS."""
+    cutoff = time.time() - SESSION_TTL_SECONDS
+    with _session_lock:
+        dead = [sid for sid, s in _session_stores.items()
+                if s.get("last_active", 0) < cutoff]
+        for sid in dead:
+            del _session_stores[sid]
+
+def _get_session_id() -> str:
+    """Return (and set) a stable session id for this browser client."""
+    if "sid" not in flask_session:
+        flask_session["sid"] = uuid.uuid4().hex
+        flask_session.permanent = True
+    return flask_session["sid"]
+
+def _get_store() -> dict:
+    """Return the store dict for the current session, creating it if needed."""
+    sid = _get_session_id()
+    with _session_lock:
+        if sid not in _session_stores:
+            _session_stores[sid] = {
+                "students": [], "source": None,
+                "school_name": None, "school_id": None,
+                "last_active": time.time(),
+            }
+        else:
+            _session_stores[sid]["last_active"] = time.time()
+        return _session_stores[sid]
+
+def replace_store(students, source, school_name, school_id=None):
+    store = _get_store()
+    old = store.get("students") or []
+    if isinstance(old, list):
+        old.clear()
+    store["students"]    = list(students)
+    store["source"]      = source
+    store["school_name"] = school_name
+    store["school_id"]   = school_id
+    store["last_active"] = time.time()
+    gc.collect()
 
 MAX_UPLOAD_MB             = int(os.environ.get("MAX_UPLOAD_MB", "12"))
-MAX_STUDENTS_PER_REQUEST  = int(os.environ.get("MAX_STUDENTS_PER_REQUEST", "1000"))
+MAX_STUDENTS_PER_REQUEST  = int(os.environ.get("MAX_STUDENTS_PER_REQUEST", "2000"))
 PREVIEW_DPI               = int(os.environ.get("PREVIEW_DPI", "150"))
 DOWNLOAD_DPI              = int(os.environ.get("DOWNLOAD_DPI", "150"))
 # ⏱  Photo timeouts — connect 6s, read 12s. titusattendence.com can be slow.
@@ -194,7 +258,7 @@ REDEEMER_GRAD_STEPS = int(os.environ.get("REDEEMER_GRAD_STEPS", "30" if _IS_PROD
 # 🗑  Max students per request in production — keeps peak RAM predictable
 if _IS_PRODUCTION:
     MAX_STUDENTS_PER_REQUEST = min(MAX_STUDENTS_PER_REQUEST,
-                                   int(os.environ.get("MAX_STUDENTS_PER_REQUEST", "300")))
+                                   int(os.environ.get("MAX_STUDENTS_PER_REQUEST", "1000")))
 
 STORAGE_BACKEND           = os.environ.get("STORAGE_BACKEND", "local").strip().lower()
 SUPABASE_URL              = os.environ.get("SUPABASE_URL", "").rstrip("/")
@@ -228,16 +292,6 @@ _adapter = HTTPAdapter(pool_connections=32, pool_maxsize=64, max_retries=_retry)
 _HTTP.mount("http://",  _adapter)
 _HTTP.mount("https://", _adapter)
 
-
-def replace_store(students, source, school_name, school_id=None):
-    old = _store.get("students") or []
-    if isinstance(old, list):
-        old.clear()
-    _store["students"]    = list(students)
-    _store["source"]      = source
-    _store["school_name"] = school_name
-    _store["school_id"]   = school_id
-    gc.collect()
 
 def filter_students_by_class(students, cls):
     cls = (cls or "").strip().upper()
@@ -579,6 +633,23 @@ def root():
 def health():
     return jsonify({"status": "ok", "message": "ID Card Generator API is healthy"})
 
+@app.route("/api/sessions", methods=["GET"])
+@app.route("/sessions", methods=["GET"])
+def get_sessions_info():
+    """Returns active session count and current session load state."""
+    _prune_old_sessions()
+    with _session_lock:
+        active = len(_session_stores)
+    store    = _get_store()
+    students = store.get("students") or []
+    return jsonify({
+        "active_sessions": active,
+        "your_session_id": _get_session_id()[:8] + "...",
+        "your_students_loaded": len(students),
+        "your_school": store.get("school_name") or "None",
+        "session_ttl_hours": SESSION_TTL_SECONDS // 3600,
+    })
+
 @app.route("/api/schools", methods=["GET"])
 @app.route("/schools", methods=["GET"])
 def get_schools():
@@ -658,8 +729,10 @@ def fetch_school(school_id):
 @app.route("/api/students", methods=["GET"])
 @app.route("/students", methods=["GET"])
 def get_students():
+    _prune_old_sessions()
+    store    = _get_store()
     cls      = request.args.get("class","").strip().upper()
-    students = _store["students"]
+    students = store["students"]
     if cls:
         students = [s for s in students if s.get("class","").strip().upper() == cls]
     return jsonify(students)
@@ -667,9 +740,13 @@ def get_students():
 @app.route("/api/status", methods=["GET"])
 @app.route("/status", methods=["GET"])
 def get_status():
-    students = _store["students"]
+    _prune_old_sessions()
+    store    = _get_store()
+    students = store["students"]
+    with _session_lock:
+        active_sessions = len(_session_stores)
     if not students:
-        return jsonify({"loaded": False})
+        return jsonify({"loaded": False, "active_sessions": active_sessions})
     cls_list    = sorted(set(s.get("class","").strip().upper() for s in students), key=class_sort_key)
     session_val = students[0].get("session", DEFAULT_SESSION)
     class_counts = {}
@@ -677,18 +754,19 @@ def get_status():
         k = s.get("class","").strip().upper()
         if k:
             class_counts[k] = class_counts.get(k, 0) + 1
-    school_name = _store.get("school_name","")
-    school_id   = _store.get("school_id")
+    school_name = store.get("school_name","")
+    school_id   = store.get("school_id")
     return jsonify({
         "loaded": True,
         "count": len(students),
         "school_id": school_id,
         "school": school_name,
         "school_name": school_name,
-        "source": _store.get("source",""),
+        "source": store.get("source",""),
         "classes": cls_list,
         "classCounts": class_counts,
         "session": session_val,
+        "active_sessions": active_sessions,
     })
 
 def _classes_summary(students):
@@ -2186,15 +2264,20 @@ def _resolve_pdf_tmp_dir() -> str:
 
 def build_pdf_file_vector(students: list, template_key: str = DEFAULT_TEMPLATE):
     if not HAS_FITZ:
+        log.error("build_pdf_file_vector: PyMuPDF (fitz) not installed")
         return None
     template_key = normalize_template_key(template_key)
     tmpl_bytes = _ensure_template(template_key)
     if tmpl_bytes is None:
+        log.error("build_pdf_file_vector: template PDF not found for key='%s'", template_key)
         return None
 
     template_doc = _get_template_doc(template_key)
     if template_doc is None:
+        log.error("build_pdf_file_vector: could not open template doc for key='%s'", template_key)
         return None
+
+    log.info("build_pdf_file_vector: %d students, template=%s", len(students), template_key)
 
     source_rect = fitz.Rect(template_doc[0].rect)
     n_pages = (len(students) + CARDS_PER_PAGE - 1) // CARDS_PER_PAGE
@@ -2224,14 +2307,21 @@ def build_pdf_file_vector(students: list, template_key: str = DEFAULT_TEMPLATE):
                     idx = future_to_idx[f]
                     try:
                         prerendered[idx] = f.result()
-                    except Exception:
+                    except Exception as e:
+                        log.error("Card render FAILED for student[%d] '%s': %s\n%s",
+                                  idx,
+                                  students[idx].get("student_name", "?"),
+                                  e,
+                                  traceback.format_exc())
                         prerendered[idx] = None
         else:
             # Serial render — minimal peak RAM
             for i, s in enumerate(students):
                 try:
                     prerendered[i] = render_fn(s, tmpl_bytes)
-                except Exception:
+                except Exception as e:
+                    log.error("Card render FAILED for student[%d] '%s': %s\n%s",
+                              i, s.get("student_name", "?"), e, traceback.format_exc())
                     prerendered[i] = None
 
     out_doc = fitz.open()
@@ -2292,7 +2382,8 @@ def build_pdf_file_vector(students: list, template_key: str = DEFAULT_TEMPLATE):
         )
         return out_path
 
-    except Exception:
+    except Exception as e:
+        log.error("build_pdf_file_vector FAILED: %s\n%s", e, traceback.format_exc())
         try:
             if os.path.exists(out_path):
                 os.unlink(out_path)
@@ -2378,8 +2469,10 @@ def build_pdf_file(students, dpi=150, template_key: str = DEFAULT_TEMPLATE):
 # ─────────────────────────────────────────────────────────────────
 def send_generated_pdf(students, dpi, download_name, as_attachment, allow_external=False, template_key: str = DEFAULT_TEMPLATE):
     if not students:
+        log.error("send_generated_pdf: no students in list")
         return jsonify({"error": "No students loaded"}), 400
     if len(students) > MAX_STUDENTS_PER_REQUEST:
+        log.error("send_generated_pdf: too many students %d > %d", len(students), MAX_STUDENTS_PER_REQUEST)
         return jsonify({
             "error": (
                 f"Too many students in one request ({len(students)}). "
@@ -2390,10 +2483,31 @@ def send_generated_pdf(students, dpi, download_name, as_attachment, allow_extern
     if (not as_attachment) and len(students) >= PREVIEW_EXTERNAL_THRESHOLD and _external_storage_enabled():
         allow_external = True
 
-    prefetch_photos(students)
-    pdf_path = build_pdf_file(students, dpi=dpi, template_key=template_key)
+    log.info("PDF generation started: %d students | template=%s | dpi=%d", len(students), template_key, dpi)
+
+    try:
+        prefetch_photos(students)
+    except Exception as e:
+        log.warning("prefetch_photos error (non-fatal): %s", e)
+
+    try:
+        pdf_path = build_pdf_file(students, dpi=dpi, template_key=template_key)
+    except Exception as e:
+        log.error("build_pdf_file EXCEPTION: %s\n%s", e, traceback.format_exc())
+        return jsonify({"error": f"PDF generation exception: {e}"}), 500
+
     if not pdf_path:
-        return jsonify({"error": "PDF generation failed — check server libs"}), 500
+        log.error("build_pdf_file returned None — check template PDF exists and PyMuPDF is installed")
+        return jsonify({"error": "PDF generation failed — template PDF missing or PyMuPDF error"}), 500
+
+    try:
+        file_size = os.path.getsize(pdf_path)
+        log.info("PDF generated: %s  size=%.1f KB", pdf_path, file_size / 1024)
+        if file_size < 1000:
+            log.error("PDF too small (%d bytes) — likely empty/corrupt", file_size)
+            return jsonify({"error": f"PDF generated but appears empty ({file_size} bytes)"}), 500
+    except Exception as e:
+        log.error("Could not stat PDF file: %s", e)
 
     @after_this_request
     def cleanup(response):
@@ -2415,9 +2529,10 @@ def send_generated_pdf(students, dpi, download_name, as_attachment, allow_extern
                     "download_url": remote_url,
                     "download_name": download_name,
                 })
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning("External storage upload failed (falling back to direct): %s", e)
 
+    log.info("Sending PDF to client: %s  attachment=%s", download_name, as_attachment)
     return send_file(
         pdf_path,
         mimetype="application/pdf",
@@ -2477,31 +2592,34 @@ def _request_template_key():
 
 def _get_students_or_fetch():
     """
-    Return the in-memory student list.
-    If the store is empty (e.g. server restarted between the fetch-school call
-    and the download click), auto-refetch from the API using the school_id query
-    param.  Returns (students_list, error_response_or_None).
+    Return ALWAYS exactly 2 values: (students_list, error_response_or_None).
+    Uses the per-session store. If empty, auto-refetches via ?school_id= param.
     """
-    students = _store.get("students") or []
+    store    = _get_store()
+    students = store.get("students") or []
     if students:
         return students, None
 
-    # Try to refetch: caller may pass ?school_id=5 or we infer from template key
+    # Store is empty — try auto-refetch
     school_id_raw = request.args.get("school_id", "").strip()
+    if not school_id_raw:
+        # Fall back to school_id remembered in this session
+        school_id_raw = str(store.get("school_id") or "").strip()
+
     if school_id_raw:
         try:
             school_id = int(school_id_raw)
         except ValueError:
-            return [], jsonify({"error": "No students loaded and invalid school_id"}), 400
+            return [], jsonify({"error": "No students loaded — invalid school_id"})
         if school_id not in SCHOOLS:
-            return [], jsonify({"error": f"No students loaded and unknown school_id {school_id}"}), 400
+            return [], jsonify({"error": f"No students loaded — unknown school_id {school_id}"})
         try:
             url = API_BASE_URL.format(school_id=school_id)
-            resp = _HTTP.get(url, timeout=30)
+            resp = _HTTP.get(url, timeout=45)
             resp.raise_for_status()
             payload = resp.json()
         except Exception as e:
-            return [], jsonify({"error": f"No students in memory and API refetch failed: {e}"}), 500
+            return [], jsonify({"error": f"No students in memory and API refetch failed: {e}"})
 
         records = None
         if isinstance(payload, list):
@@ -2516,18 +2634,18 @@ def _get_students_or_fetch():
                         records = v; break
 
         if not records:
-            return [], jsonify({"error": "API refetch returned no records"}), 500
+            return [], jsonify({"error": "API refetch returned no records"})
 
         fetched = [map_api_record(r) for r in records if isinstance(r, dict)]
         fetched = [s for s in fetched if any(v for v in s.values() if v and v != DEFAULT_SESSION)]
         if not fetched:
-            return [], jsonify({"error": "API refetch: no valid students after mapping"}), 500
+            return [], jsonify({"error": "API refetch: no valid students after mapping"})
 
         fetched = _sort_and_index(fetched)
         replace_store(fetched, "api", SCHOOLS[school_id], school_id=school_id)
         return fetched, None
 
-    return [], jsonify({"error": "No students loaded. Please fetch or upload students first."}), 400
+    return [], jsonify({"error": "No students loaded. Please go back and reload student data."})
 
 
 @app.route("/api/preview/all", methods=["GET"])
@@ -2544,6 +2662,63 @@ def preview_all():
     return send_generated_pdf(students, dpi=PREVIEW_DPI,
                               download_name=f"preview_{template_key}.pdf", as_attachment=False,
                               template_key=template_key)
+
+@app.route("/api/debug/download", methods=["GET"])
+def debug_download():
+    """
+    Diagnose download failures — returns JSON explaining exactly what went wrong.
+    Call: GET /api/debug/download?template=ab_ascent&school_id=5
+    """
+    report = {}
+    template_key = normalize_template_key(request.args.get("template", DEFAULT_TEMPLATE))
+    report["template_key"] = template_key
+
+    # Session / students
+    store    = _get_store()
+    students = store.get("students") or []
+    report["students_in_session"] = len(students)
+    report["school_name"]         = store.get("school_name")
+    report["school_id"]           = store.get("school_id")
+
+    # Template PDF
+    tmpl_cfg  = get_template_config(template_key)
+    pdf_path  = tmpl_cfg["pdf"]
+    report["template_pdf_path"]   = str(pdf_path)
+    report["template_pdf_exists"] = pdf_path.exists()
+
+    # Libs
+    report["has_fitz"] = HAS_FITZ
+    report["has_pil"]  = HAS_PIL
+
+    # Temp dir
+    tmp_dir = _resolve_pdf_tmp_dir()
+    report["temp_dir"] = tmp_dir
+    try:
+        import shutil
+        free_mb = shutil.disk_usage(tmp_dir).free / (1024*1024)
+        report["temp_dir_free_mb"] = round(free_mb, 1)
+    except Exception as e:
+        report["temp_dir_free_mb_error"] = str(e)
+
+    # Try rendering ONE card
+    if students and HAS_FITZ and pdf_path.exists():
+        tmpl_bytes = _ensure_template(template_key)
+        render_fn  = (_render_priyanka_card_bytes if template_key == "priyanka"
+                      else _render_ab_ascent_card_bytes)
+        try:
+            card_bytes = render_fn(students[0], tmpl_bytes)
+            report["single_card_render"] = "OK" if card_bytes else "returned None"
+            report["single_card_bytes"]  = len(card_bytes) if card_bytes else 0
+        except Exception as e:
+            report["single_card_render"] = "EXCEPTION"
+            report["single_card_error"]  = str(e)
+            report["single_card_trace"]  = traceback.format_exc()
+
+    report["max_students_per_request"] = MAX_STUDENTS_PER_REQUEST
+    report["over_limit"] = len(students) > MAX_STUDENTS_PER_REQUEST
+
+    return jsonify(report), 200
+
 
 @app.route("/api/download/all", methods=["GET"])
 @app.route("/download/all", methods=["GET"])
